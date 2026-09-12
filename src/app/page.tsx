@@ -25,36 +25,12 @@ import {
 import confetti from 'canvas-confetti';
 import { supabase, isSupabaseConfigured, Message } from '@/lib/supabase';
 
-const INITIAL_MESSAGES: Message[] = [
-  {
-    id: '1',
-    sender_id: 'partner',
-    text: 'Salom! Qayerdasan? Telegramda topolmadim seni 👀',
-    is_read: true,
-    created_at: new Date(Date.now() - 3600000 * 2).toISOString(),
-  },
-  {
-    id: '2',
-    sender_id: 'me',
-    text: 'Salom! Senda telegram ko‘payib ketganiga, faqat ikkalamiz uchun maxsus joy qildim 😉',
-    is_read: true,
-    created_at: new Date(Date.now() - 3600000 * 1.5).toISOString(),
-  },
-  {
-    id: '3',
-    sender_id: 'partner',
-    text: 'Vooy, rostdanmi?! Endi faqat shu yerda yozishamiz! ✨😍',
-    is_read: true,
-    created_at: new Date(Date.now() - 3600000 * 1.2).toISOString(),
-  }
-];
-
 export default function ChatApp() {
   const [currentUser, setCurrentUser] = useState<'guest' | 'me' | 'partner'>('guest');
   const [passwordInput, setPasswordInput] = useState('');
   const [authError, setAuthError] = useState('');
 
-  const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showProfileDrawer, setShowProfileDrawer] = useState(false);
@@ -83,16 +59,12 @@ export default function ChatApp() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // 1. Ekran ochilishi bilan xotiradan ma'lumotlarni o'qish
+  // 1. Ekran ochilishi bilan xotiradan faqat login qilingan foydalanuvchini o'qish
   useEffect(() => {
     try {
       const savedUser = localStorage.getItem('azza_auth_user');
       if (savedUser === 'me' || savedUser === 'partner') {
         setCurrentUser(savedUser);
-      }
-      const savedMsgs = localStorage.getItem('azza_chat_messages');
-      if (savedMsgs) {
-        setMessages(JSON.parse(savedMsgs));
       }
     } catch (e) {
       console.error(e);
@@ -141,7 +113,7 @@ export default function ChatApp() {
       if (data && !error && data.length > 0) {
         const parsedList = data.map(parseIncomingMsg);
         setMessages(parsedList);
-        try { localStorage.setItem('azza_chat_messages', JSON.stringify(parsedList)); } catch {}
+
       }
     } catch (e) {
       console.error('Fetch error:', e);
@@ -167,21 +139,21 @@ export default function ChatApp() {
           setMessages((prev) => {
             if (prev.some((m) => m.id === newMsg.id)) return prev;
             const updated = [...prev, newMsg];
-            try { localStorage.setItem('azza_chat_messages', JSON.stringify(updated)); } catch {}
+
             return updated;
           });
         } else if (payload.eventType === 'UPDATE') {
           const updatedMsg = parseIncomingMsg(payload.new);
           setMessages((prev) => {
             const updated = prev.map((m) => (m.id === updatedMsg.id ? updatedMsg : m));
-            try { localStorage.setItem('azza_chat_messages', JSON.stringify(updated)); } catch {}
+
             return updated;
           });
         } else if (payload.eventType === 'DELETE') {
           const deletedId = (payload.old as { id: string }).id;
           setMessages((prev) => {
             const updated = prev.filter((m) => m.id !== deletedId);
-            try { localStorage.setItem('azza_chat_messages', JSON.stringify(updated)); } catch {}
+
             return updated;
           });
         }
@@ -248,11 +220,7 @@ export default function ChatApp() {
       created_at: new Date().toISOString()
     };
 
-    setMessages((prev) => {
-      const updated = [...prev, newMsg];
-      try { localStorage.setItem('azza_chat_messages', JSON.stringify(updated)); } catch {}
-      return updated;
-    });
+    setMessages((prev) => [...prev, newMsg]);
     setInputText('');
 
     if (supabase) {
@@ -300,11 +268,7 @@ export default function ChatApp() {
     setSelectedMessage(null);
 
     // UI'dan tezkor o'chirish
-    setMessages((prev) => {
-      const updated = prev.filter((m) => m.id !== targetId);
-      try { localStorage.setItem('azza_chat_messages', JSON.stringify(updated)); } catch {}
-      return updated;
-    });
+    setMessages((prev) => prev.filter((m) => m.id !== targetId));
 
     if (supabase) {
       await supabase.from('messages').delete().eq('id', targetId);
@@ -344,13 +308,9 @@ export default function ChatApp() {
     const targetId = editingMessage.id;
 
     // 1. UI'da darhol ko'rsatish
-    setMessages((prev) => {
-      const updated = prev.map((m) => 
-        m.id === targetId ? { ...m, text: newText, is_edited: true } : m
-      );
-      try { localStorage.setItem('azza_chat_messages', JSON.stringify(updated)); } catch {}
-      return updated;
-    });
+    setMessages((prev) => 
+      prev.map((m) => (m.id === targetId ? { ...m, text: newText, is_edited: true } : m))
+    );
 
     // Tozalash
     setEditingMessage(null);
@@ -385,11 +345,7 @@ export default function ChatApp() {
         created_at: new Date().toISOString()
       };
 
-      setMessages((prev) => {
-        const updated = [...prev, newMsg];
-        try { localStorage.setItem('azza_chat_messages', JSON.stringify(updated)); } catch {}
-        return updated;
-      });
+      setMessages((prev) => [...prev, newMsg]);
 
       if (supabase) {
         const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({
@@ -466,7 +422,7 @@ export default function ChatApp() {
 
           setMessages((prev) => {
             const updated = [...prev, newMsg];
-            try { localStorage.setItem('azza_chat_messages', JSON.stringify(updated)); } catch {}
+
             return updated;
           });
 
