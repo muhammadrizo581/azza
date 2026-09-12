@@ -587,7 +587,8 @@ export default function ChatApp() {
   // ==========================================
   // 2. ASOSIY TELEGRAM CHAT EKRANI
   // ==========================================
-  const partnerDisplayName = currentUser === 'me' ? 'Aziza 🤍' : 'Sizning Yoringiz 🤍';
+  const myDisplayName = currentUser === 'me' ? 's0nd ❤️' : 'azza ❤️';
+  const partnerDisplayName = currentUser === 'me' ? 'azza ❤️' : 's0nd ❤️';
 
   // Tanlangan xabar faqat o'zinikimi? (Faqat o'zinikini edit/delete qilish uchun)
   const isSelectedMsgMine = selectedMessage ? selectedMessage.sender_id === currentUser : false;
@@ -601,8 +602,8 @@ export default function ChatApp() {
           onClick={() => setShowProfileDrawer(true)}
           className="flex items-center space-x-2.5 cursor-pointer active:opacity-80"
         >
-          <div className="relative w-10 h-10 rounded-full bg-gradient-to-tr from-pink-500 via-purple-500 to-indigo-500 flex items-center justify-center font-bold text-base text-white shadow-md">
-            <span>{partnerDisplayName[0]}</span>
+          <div className="relative w-10 h-10 rounded-full bg-gradient-to-tr from-rose-500 via-pink-500 to-indigo-500 flex items-center justify-center font-bold text-base text-white shadow-md">
+            <span>{partnerDisplayName[0].toUpperCase()}</span>
             <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 border-2 border-[#17212b] rounded-full"></span>
           </div>
           <div>
@@ -616,7 +617,7 @@ export default function ChatApp() {
 
         <div className="flex items-center space-x-2">
           <div className="px-2.5 py-1 rounded-full text-xs font-semibold bg-[#242f3d] text-[#6ab2f2] border border-[#3b4b5e]">
-            {currentUser === 'me' ? 'Men' : 'Aziza'}
+            {myDisplayName}
           </div>
 
           <button
@@ -999,11 +1000,11 @@ export default function ChatApp() {
 
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
             <div className="flex flex-col items-center py-4 bg-[#242f3d]/50 rounded-2xl border border-[#2f3f52]">
-              <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-pink-500 to-indigo-500 flex items-center justify-center font-bold text-3xl shadow-xl">
+              <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-rose-500 to-indigo-500 flex items-center justify-center font-bold text-3xl shadow-xl">
                 <span>{currentUser === 'me' ? 'S' : 'A'}</span>
               </div>
               <h3 className="font-bold text-lg mt-2">
-                {currentUser === 'me' ? 'Siz (Admin)' : 'Aziza'}
+                {myDisplayName}
               </h3>
               <span className="text-xs text-emerald-400 mt-0.5">Xavfsiz ulanish faol</span>
             </div>
