@@ -59,17 +59,38 @@ export default function ChatApp() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // 1. Ekran ochilishi bilan xotiradan faqat login qilingan foydalanuvchini o'qish
+  // 1. Ekran ochilishi bilan xotiradan login va keshdagi xabarlarni lahzada (instant) yuklash
   useEffect(() => {
     try {
       const savedUser = localStorage.getItem('azza_auth_user');
       if (savedUser === 'me' || savedUser === 'partner') {
         setCurrentUser(savedUser);
       }
+      const cached = localStorage.getItem('azza_chat_cache');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setMessages(parsed);
+        }
+      }
     } catch (e) {
       console.error(e);
     }
   }, []);
+
+  // Xabarlar har o'zgarganda keshni yangilab borish
+  const updateMessagesState = (updater: Message[] | ((prev: Message[]) => Message[])) => {
+    setMessages((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      try {
+        localStorage.setItem('azza_chat_cache', JSON.stringify(next));
+      } catch (err) {
+        // Agar xotira to'lsa (katta rasm/audioda)
+        console.warn('Cache quota exceeded:', err);
+      }
+      return next;
+    });
+  };
 
   // Xabarni parse qilish (oddiy text yoki maxsus json media/edit ma'lumotlari)
   const parseIncomingMsg = (raw: any): Message => {
@@ -101,18 +122,19 @@ export default function ChatApp() {
     };
   };
 
-  // 2. Xabarlarni Supabase orqali yuklash
+  // 2. Xabarlarni Supabase orqali yuklash (Ultra-fast)
   const loadMessages = async () => {
     if (!supabase) return;
     try {
       const { data, error } = await supabase
         .from('messages')
         .select('*')
-        .order('created_at', { ascending: true });
+        .order('created_at', { ascending: true })
+        .limit(200);
 
       if (!error && data) {
         const parsedList = data.map(parseIncomingMsg);
-        setMessages(parsedList);
+        updateMessagesState(parsedList);
       }
     } catch (e) {
       console.error('Fetch error:', e);
@@ -135,25 +157,19 @@ export default function ChatApp() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'messages' }, (payload) => {
         if (payload.eventType === 'INSERT') {
           const newMsg = parseIncomingMsg(payload.new);
-          setMessages((prev) => {
+          updateMessagesState((prev) => {
             if (prev.some((m) => m.id === newMsg.id)) return prev;
-            const updated = [...prev, newMsg];
-
-            return updated;
+            return [...prev, newMsg];
           });
         } else if (payload.eventType === 'UPDATE') {
           const updatedMsg = parseIncomingMsg(payload.new);
-          setMessages((prev) => {
-            const updated = prev.map((m) => (m.id === updatedMsg.id ? updatedMsg : m));
-
-            return updated;
+          updateMessagesState((prev) => {
+            return prev.map((m) => (m.id === updatedMsg.id ? updatedMsg : m));
           });
         } else if (payload.eventType === 'DELETE') {
           const deletedId = (payload.old as { id: string }).id;
-          setMessages((prev) => {
-            const updated = prev.filter((m) => m.id !== deletedId);
-
-            return updated;
+          updateMessagesState((prev) => {
+            return prev.filter((m) => m.id !== deletedId);
           });
         }
       })
@@ -219,7 +235,7 @@ export default function ChatApp() {
       created_at: new Date().toISOString()
     };
 
-    setMessages((prev) => [...prev, newMsg]);
+    updateMessagesState((prev) => [...prev, newMsg]);
     setInputText('');
 
     if (supabase) {
@@ -266,8 +282,8 @@ export default function ChatApp() {
     const targetId = selectedMessage.id;
     setSelectedMessage(null);
 
-    // UI'dan tezkor o'chirish
-    setMessages((prev) => prev.filter((m) => m.id !== targetId));
+    // UI'dan tezkor o'chirish va keshni yangilash
+    updateMessagesState((prev) => prev.filter((m) => m.id !== targetId));
 
     if (supabase) {
       await supabase.from('messages').delete().eq('id', targetId);
@@ -306,8 +322,8 @@ export default function ChatApp() {
 
     const targetId = editingMessage.id;
 
-    // 1. UI'da darhol ko'rsatish
-    setMessages((prev) => 
+    // 1. UI va keshda darhol ko'rsatish
+    updateMessagesState((prev) => 
       prev.map((m) => (m.id === targetId ? { ...m, text: newText, is_edited: true } : m))
     );
 
@@ -344,7 +360,7 @@ export default function ChatApp() {
         created_at: new Date().toISOString()
       };
 
-      setMessages((prev) => [...prev, newMsg]);
+      updateMessagesState((prev) => [...prev, newMsg]);
 
       if (supabase) {
         const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({
@@ -419,11 +435,7 @@ export default function ChatApp() {
             created_at: new Date().toISOString()
           };
 
-          setMessages((prev) => {
-            const updated = [...prev, newMsg];
-
-            return updated;
-          });
+          updateMessagesState((prev) => [...prev, newMsg]);
 
           if (supabase) {
             const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({
