@@ -27,6 +27,7 @@ import { supabase, isSupabaseConfigured, Message } from '@/lib/supabase';
 
 export default function ChatApp() {
   const [currentUser, setCurrentUser] = useState<'guest' | 'me' | 'partner'>('guest');
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
   const [passwordInput, setPasswordInput] = useState('');
   const [authError, setAuthError] = useState('');
 
@@ -75,6 +76,8 @@ export default function ChatApp() {
       }
     } catch (e) {
       console.error(e);
+    } finally {
+      setIsAuthChecking(false);
     }
   }, []);
 
@@ -516,6 +519,11 @@ export default function ChatApp() {
       };
     }
   };
+
+  // Tekshirilayotgan paytda (millisekundlar ichida) login ekrani miltillab ko'rinmasligi uchun
+  if (isAuthChecking) {
+    return <div className="min-h-[100dvh] w-full bg-[#0e1621]" />;
+  }
 
   // ==========================================
   // 1. LOGIN EKRANI
