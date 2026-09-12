@@ -110,10 +110,9 @@ export default function ChatApp() {
         .select('*')
         .order('created_at', { ascending: true });
 
-      if (data && !error && data.length > 0) {
+      if (!error && data) {
         const parsedList = data.map(parseIncomingMsg);
         setMessages(parsedList);
-
       }
     } catch (e) {
       console.error('Fetch error:', e);
@@ -204,7 +203,7 @@ export default function ChatApp() {
   };
 
   // Yangi xabar jo'natish
-  const handleSendMessage = (e?: React.FormEvent) => {
+  const handleSendMessage = async (e?: React.FormEvent) => {
     if (e) {
       e.preventDefault();
       e.stopPropagation();
@@ -224,7 +223,7 @@ export default function ChatApp() {
     setInputText('');
 
     if (supabase) {
-      supabase.from('messages').insert([
+      await supabase.from('messages').insert([
         {
           id: newMsg.id,
           sender_id: newMsg.sender_id,
@@ -232,7 +231,7 @@ export default function ChatApp() {
           created_at: newMsg.created_at,
           is_read: false
         }
-      ]).then();
+      ]);
     }
 
     if (trimmed.includes('❤️') || trimmed.toLowerCase().includes('sevaman') || trimmed.toLowerCase().includes('love')) {
