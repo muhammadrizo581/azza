@@ -17,7 +17,8 @@ export interface Message {
   sender_id: 'me' | 'partner';
   text: string;
   media_url?: string;
-  media_type?: 'image' | 'voice' | 'sticker' | 'file';
+  media_urls?: string[];
+  media_type?: 'image' | 'voice' | 'video_note' | 'sticker' | 'file';
   reply_to?: {
     id: string;
     text: string;

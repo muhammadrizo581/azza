@@ -18,6 +18,7 @@ import {
   Copy,
   Image as ImageIcon,
   Mic,
+  Video,
   Play,
   Pause,
   Check
@@ -37,6 +38,9 @@ export default function ChatApp() {
   const [showProfileDrawer, setShowProfileDrawer] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
+  // INPUT TURI (mic yoki video note - Telegram kabi bitta bossa almashadi)
+  const [inputMode, setInputMode] = useState<'voice' | 'video'>('voice');
+
   // TELEGRAM USLUBIDAGI ACTION MENU
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
@@ -50,6 +54,15 @@ export default function ChatApp() {
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  // TELEGRAM YUMALOQ VIDEO RECORDING
+  const [isVideoRecording, setIsVideoRecording] = useState(false);
+  const [videoRecordingDuration, setVideoRecordingDuration] = useState(0);
+  const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
+  const videoChunksRef = useRef<Blob[]>([]);
+  const videoRecorderRef = useRef<MediaRecorder | null>(null);
+  const videoTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const liveVideoPreviewRef = useRef<HTMLVideoElement | null>(null);
+
   // AUDIO PLAYING
   const [playingAudio, setPlayingAudio] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -58,6 +71,8 @@ export default function ChatApp() {
   const inputRef = useRef<HTMLInputElement>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pressTriggerTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isHoldingRecordRef = useRef<boolean>(false);
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // 1. Ekran ochilishi bilan xotiradan login va keshdagi xabarlarni lahzada (instant) yuklash
@@ -99,6 +114,7 @@ export default function ChatApp() {
   const parseIncomingMsg = (raw: any): Message => {
     let text = raw.text || '';
     let media_url = raw.media_url || undefined;
+    let media_urls = raw.media_urls || undefined;
     let media_type = raw.media_type || undefined;
     let is_edited = raw.is_edited || false;
 
@@ -108,6 +124,7 @@ export default function ChatApp() {
         const parsed = JSON.parse(text.replace('__PAYLOAD_JSON__:', ''));
         text = parsed.text || '';
         media_url = parsed.media_url || media_url;
+        media_urls = parsed.media_urls || media_urls;
         media_type = parsed.media_type || media_type;
         is_edited = parsed.is_edited !== undefined ? parsed.is_edited : is_edited;
       } catch {}
@@ -118,6 +135,7 @@ export default function ChatApp() {
       sender_id: raw.sender_id,
       text,
       media_url,
+      media_urls,
       media_type,
       is_edited,
       is_read: raw.is_read || false,
@@ -344,53 +362,60 @@ export default function ChatApp() {
     }
   };
 
-  // RASM YUKLASH (IMAGE)
-  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || currentUser === 'guest') return;
+  // RASMLAR YUKLASH (IMAGE - TELEGRAM USLUBIDA BIR NECHTA RASM YUKLASH)
+  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0 || currentUser === 'guest') return;
 
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const base64Url = reader.result as string;
-
-      const newMsg: Message = {
-        id: `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-        sender_id: currentUser as 'me' | 'partner',
-        text: '',
-        media_url: base64Url,
-        media_type: 'image',
-        is_read: false,
-        created_at: new Date().toISOString()
-      };
-
-      updateMessagesState((prev) => [...prev, newMsg]);
-
-      if (supabase) {
-        const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({
-          text: '',
-          media_url: base64Url,
-          media_type: 'image'
-        })}`;
-
-        await supabase.from('messages').insert([
-          {
-            id: newMsg.id,
-            sender_id: newMsg.sender_id,
-            text: payloadText,
-            created_at: newMsg.created_at,
-            is_read: false
-          }
-        ]);
-      }
+    const fileList = Array.from(files);
+    const readBase64 = (file: File): Promise<string> => {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.readAsDataURL(file);
+      });
     };
-    reader.readAsDataURL(file);
+
+    const base64List = await Promise.all(fileList.map(readBase64));
+
+    const newMsg: Message = {
+      id: `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+      sender_id: currentUser as 'me' | 'partner',
+      text: '',
+      media_url: base64List[0],
+      media_urls: base64List,
+      media_type: 'image',
+      is_read: false,
+      created_at: new Date().toISOString()
+    };
+
+    updateMessagesState((prev) => [...prev, newMsg]);
+
+    if (supabase) {
+      const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({
+        text: '',
+        media_url: base64List[0],
+        media_urls: base64List,
+        media_type: 'image'
+      })}`;
+
+      await supabase.from('messages').insert([
+        {
+          id: newMsg.id,
+          sender_id: newMsg.sender_id,
+          text: payloadText,
+          created_at: newMsg.created_at,
+          is_read: false
+        }
+      ]);
+    }
     e.target.value = '';
   };
 
-  // OVOZ YOZISH (VOICE / GOLOS) - iOS Safari va Android uchun to'liq moslangan
+  // OVOZ YOZISH (VOICE / GOLOS) - "Ovozli xabar" yozuvi butunlay olib tashlangan
   const handleStartRecording = async () => {
     if (!navigator?.mediaDevices?.getUserMedia) {
-      alert('Brauzeringiz mikrofonga ruxsat bermayapti (HTTPS yoki Safari sozlamalarini tekshiring)');
+      alert('Brauzeringiz mikrofonga ruxsat bermayapti (HTTPS yoki sozlamalarni tekshiring)');
       return;
     }
 
@@ -431,7 +456,7 @@ export default function ChatApp() {
           const newMsg: Message = {
             id: `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
             sender_id: currentUser as 'me' | 'partner',
-            text: `🎤 Ovozli xabar (${recordingDuration || 1}s)`,
+            text: '', // Matn yo'q, Telegramdek faqat audio pleyer
             media_url: base64Audio,
             media_type: 'voice',
             is_read: false,
@@ -442,7 +467,7 @@ export default function ChatApp() {
 
           if (supabase) {
             const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({
-              text: `🎤 Ovozli xabar (${recordingDuration || 1}s)`,
+              text: '',
               media_url: base64Audio,
               media_type: 'voice'
             })}`;
@@ -462,7 +487,6 @@ export default function ChatApp() {
         stream.getTracks().forEach((track) => track.stop());
       };
 
-      // Har 250ms da audio bo'laklarini yig'ish (kesilib qolmasligi uchun)
       mediaRecorder.start(250);
       setIsRecording(true);
       setRecordingDuration(0);
@@ -473,7 +497,7 @@ export default function ChatApp() {
     } catch (err: unknown) {
       console.error("Mic error:", err);
       const errorMsg = err instanceof Error ? err.message : String(err);
-      alert(`Mikrofon xatosi: ${errorMsg}. iOS Safari sozlamalarida "Microphone"ga ruxsat yoqilganligini tekshiring.`);
+      alert(`Mikrofon xatosi: ${errorMsg}. Safari yoki brauzer sozlamalarida mikrofonga ruxsat bering.`);
     }
   };
 
@@ -497,6 +521,167 @@ export default function ChatApp() {
         clearInterval(recordingTimerRef.current);
         recordingTimerRef.current = null;
       }
+    }
+  };
+
+  // TELEGRAM YUMALOQ VIDEO (VIDEO NOTE) YOZISH
+  const handleStartVideoRecording = async () => {
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      alert('Brauzeringiz kameraga ruxsat bermayapti');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 480 }, aspectRatio: 1 },
+        audio: true
+      });
+
+      setVideoStream(stream);
+      if (liveVideoPreviewRef.current) {
+        liveVideoPreviewRef.current.srcObject = stream;
+        liveVideoPreviewRef.current.play().catch(() => {});
+      }
+
+      let mimeType = '';
+      if (typeof MediaRecorder.isTypeSupported === 'function') {
+        if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')) {
+          mimeType = 'video/mp4;codecs=avc1';
+        } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+          mimeType = 'video/mp4';
+        } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
+          mimeType = 'video/webm;codecs=vp9';
+        } else if (MediaRecorder.isTypeSupported('video/webm')) {
+          mimeType = 'video/webm';
+        }
+      }
+
+      const options = mimeType ? { mimeType } : undefined;
+      const mediaRecorder = new MediaRecorder(stream, options);
+      videoRecorderRef.current = mediaRecorder;
+      videoChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          videoChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        const selectedType = mimeType || mediaRecorder.mimeType || 'video/mp4';
+        const videoBlob = new Blob(videoChunksRef.current, { type: selectedType });
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          const base64Video = reader.result as string;
+
+          const newMsg: Message = {
+            id: `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+            sender_id: currentUser as 'me' | 'partner',
+            text: '',
+            media_url: base64Video,
+            media_type: 'video_note',
+            is_read: false,
+            created_at: new Date().toISOString()
+          };
+
+          updateMessagesState((prev) => [...prev, newMsg]);
+
+          if (supabase) {
+            const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({
+              text: '',
+              media_url: base64Video,
+              media_type: 'video_note'
+            })}`;
+
+            await supabase.from('messages').insert([
+              {
+                id: newMsg.id,
+                sender_id: newMsg.sender_id,
+                text: payloadText,
+                created_at: newMsg.created_at,
+                is_read: false
+              }
+            ]);
+          }
+        };
+        reader.readAsDataURL(videoBlob);
+        stream.getTracks().forEach((track) => track.stop());
+        setVideoStream(null);
+      };
+
+      mediaRecorder.start(250);
+      setIsVideoRecording(true);
+      setVideoRecordingDuration(0);
+
+      videoTimerRef.current = setInterval(() => {
+        setVideoRecordingDuration((prev) => prev + 1);
+      }, 1000);
+    } catch (err: unknown) {
+      console.error("Camera error:", err);
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      alert(`Kamera/Mikrofon xatosi: ${errorMsg}. Brauzer sozlamalaridan ruxsat bering.`);
+    }
+  };
+
+  const handleStopVideoRecording = () => {
+    if (videoRecorderRef.current && isVideoRecording) {
+      videoRecorderRef.current.stop();
+      setIsVideoRecording(false);
+      if (videoTimerRef.current) {
+        clearInterval(videoTimerRef.current);
+        videoTimerRef.current = null;
+      }
+    }
+  };
+
+  const handleCancelVideoRecording = () => {
+    if (videoRecorderRef.current && isVideoRecording) {
+      videoChunksRef.current = [];
+      videoRecorderRef.current.stop();
+      setIsVideoRecording(false);
+      if (videoTimerRef.current) {
+        clearInterval(videoTimerRef.current);
+        videoTimerRef.current = null;
+      }
+      if (videoStream) {
+        videoStream.getTracks().forEach(t => t.stop());
+        setVideoStream(null);
+      }
+    }
+  };
+
+  // TELEGRAM USLUBIDAGI MIC/VIDEO TUGMASI HANDLERLARI
+  const handleRecordButtonDown = () => {
+    isHoldingRecordRef.current = false;
+    pressTriggerTimerRef.current = setTimeout(() => {
+      isHoldingRecordRef.current = true;
+      if (window.navigator?.vibrate) window.navigator.vibrate(50);
+      if (inputMode === 'voice') {
+        handleStartRecording();
+      } else {
+        handleStartVideoRecording();
+      }
+    }, 280); // 280ms bosib tursa yozish boshlanadi
+  };
+
+  const handleRecordButtonUp = () => {
+    if (pressTriggerTimerRef.current) {
+      clearTimeout(pressTriggerTimerRef.current);
+      pressTriggerTimerRef.current = null;
+    }
+
+    if (isHoldingRecordRef.current) {
+      // Bosib turilgan bo'lsa - qo'yib yuborganda yuboradi
+      if (isRecording) {
+        handleStopRecording();
+      } else if (isVideoRecording) {
+        handleStopVideoRecording();
+      }
+      isHoldingRecordRef.current = false;
+    } else {
+      // Shunchaki bitta bosib qo'yib yuborsa - rejim almashadi (Mic <-> Video)
+      setInputMode((prev) => (prev === 'voice' ? 'video' : 'voice'));
+      if (window.navigator?.vibrate) window.navigator.vibrate(20);
     }
   };
 
@@ -679,45 +864,81 @@ export default function ChatApp() {
                     : 'bg-[#182533] text-white rounded-bl-xs'
                 }`}
               >
-                {/* RASM KO'RINISHI */}
-                {msg.media_type === 'image' && msg.media_url && (
-                  <div className="mb-1 rounded-xl overflow-hidden max-h-72">
-                    <img 
-                      src={msg.media_url} 
-                      alt="rasm" 
-                      className="w-full h-auto object-cover rounded-xl"
-                    />
+                {/* RASMLAR KO'RINISHI (TELEGRAM USLUBIDA 1 TA YOKI BIR NECHTA RASMLAR ALBOMI) */}
+                {msg.media_type === 'image' && (
+                  <div className="mb-1 rounded-xl overflow-hidden">
+                    {msg.media_urls && msg.media_urls.length > 1 ? (
+                      <div className={`grid gap-1 ${msg.media_urls.length === 2 ? 'grid-cols-2' : 'grid-cols-2'}`}>
+                        {msg.media_urls.map((imgSrc, idx) => (
+                          <div key={idx} className="relative aspect-square overflow-hidden rounded-lg bg-black/20">
+                            <img 
+                              src={imgSrc} 
+                              alt={`rasm ${idx + 1}`} 
+                              className="w-full h-full object-cover"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="max-h-72 overflow-hidden rounded-xl">
+                        <img 
+                          src={msg.media_url || (msg.media_urls && msg.media_urls[0])} 
+                          alt="rasm" 
+                          className="w-full h-auto object-cover rounded-xl"
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
 
-                {/* GOLOS (OVOZ) KO'RINISHI */}
+                {/* TELEGRAM YUMALOQ VIDEO (VIDEO NOTE) KO'RINISHI */}
+                {msg.media_type === 'video_note' && msg.media_url && (
+                  <div className="py-1">
+                    <div className="w-56 h-56 rounded-full overflow-hidden border-2 border-[#6ab2f2] shadow-2xl relative bg-black mx-auto">
+                      <video 
+                        src={msg.media_url} 
+                        playsInline 
+                        loop 
+                        controls
+                        className="w-full h-full object-cover"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* GOLOS (OVOZ) KO'RINISHI - "Ovozli xabar" YOZUVI BUTUNLAY YO'Q, FAQAT PLEYER */}
                 {msg.media_type === 'voice' && msg.media_url && (
-                  <div className="flex items-center space-x-3 py-1 pr-2">
+                  <div className="flex items-center space-x-3 py-1 pr-1 select-none">
                     <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
                         handleTogglePlayAudio(msg.id, msg.media_url);
                       }}
-                      className="w-10 h-10 rounded-full bg-[#6ab2f2] text-white flex items-center justify-center shrink-0 shadow active:scale-95 transition"
+                      className="w-10 h-10 rounded-full bg-[#6ab2f2] active:bg-[#529cd8] text-white flex items-center justify-center shrink-0 shadow active:scale-95 transition"
                     >
                       {playingAudio === msg.id ? (
-                        <Pause className="w-5 h-5" />
+                        <Pause className="w-5 h-5 fill-current" />
                       ) : (
-                        <Play className="w-5 h-5 ml-0.5" />
+                        <Play className="w-5 h-5 ml-0.5 fill-current" />
                       )}
                     </button>
-                    <div className="flex flex-col">
-                      <span className="text-xs font-semibold text-white/90">Ovozli xabar</span>
-                      <div className="flex items-center space-x-1 mt-0.5">
-                        <span className="w-1 h-3 bg-[#6ab2f2] rounded-full animate-pulse"></span>
-                        <span className="w-1 h-5 bg-[#6ab2f2] rounded-full animate-pulse"></span>
-                        <span className="w-1 h-2 bg-[#6ab2f2] rounded-full animate-pulse"></span>
-                        <span className="w-1 h-4 bg-[#6ab2f2] rounded-full animate-pulse"></span>
-                        <span className="text-[11px] text-white/60 ml-2">
-                          {playingAudio === msg.id ? 'Eshitilmoqda...' : '0:05'}
-                        </span>
+                    <div className="flex flex-col flex-1 justify-center min-w-[120px]">
+                      <div className="flex items-center space-x-1">
+                        <span className="w-1 h-3 bg-[#6ab2f2] rounded-full"></span>
+                        <span className="w-1 h-5 bg-[#6ab2f2] rounded-full"></span>
+                        <span className="w-1 h-2 bg-[#6ab2f2] rounded-full"></span>
+                        <span className="w-1 h-6 bg-[#6ab2f2] rounded-full"></span>
+                        <span className="w-1 h-4 bg-[#6ab2f2] rounded-full"></span>
+                        <span className="w-1 h-7 bg-[#6ab2f2] rounded-full"></span>
+                        <span className="w-1 h-3 bg-[#6ab2f2] rounded-full"></span>
+                        <span className="w-1 h-5 bg-[#6ab2f2] rounded-full"></span>
+                        <span className="w-1 h-2 bg-[#6ab2f2] rounded-full"></span>
+                        <span className="w-1 h-4 bg-[#6ab2f2] rounded-full"></span>
                       </div>
+                      <span className="text-[11px] text-white/70 mt-1 font-mono">
+                        {playingAudio === msg.id ? '▶ eshitilmoqda' : '0:05'}
+                      </span>
                     </div>
                   </div>
                 )}
@@ -840,6 +1061,33 @@ export default function ChatApp() {
             </button>
           </div>
         </footer>
+      ) : isVideoRecording ? (
+        /* TELEGRAM YUMALOQ VIDEO YOZISH REJIMI */
+        <footer className="safe-bottom shrink-0 bg-[#17212b] border-t border-[#202b36] p-3 flex items-center justify-between z-20 animate-in slide-in-from-bottom">
+          <div className="flex items-center space-x-2.5">
+            <span className="w-3 h-3 rounded-full bg-emerald-500 animate-ping"></span>
+            <span className="text-sm font-medium text-emerald-400">
+              Yumaloq video yozilmoqda... {videoRecordingDuration}s
+            </span>
+          </div>
+
+          <div className="flex items-center space-x-3">
+            <button
+              type="button"
+              onClick={handleCancelVideoRecording}
+              className="text-xs text-[#7f91a4] hover:text-white px-2 py-1"
+            >
+              Bekor qilish
+            </button>
+            <button
+              type="button"
+              onClick={handleStopVideoRecording}
+              className="p-2.5 bg-emerald-500 text-white rounded-full active:scale-95 shadow"
+            >
+              <Send className="w-4 h-4" />
+            </button>
+          </div>
+        </footer>
       ) : (
         /* STANDART INPUT PANEL */
         <footer className="safe-bottom shrink-0 bg-[#17212b] border-t border-[#202b36] p-2.5">
@@ -851,6 +1099,7 @@ export default function ChatApp() {
               ref={fileInputRef}
               type="file" 
               accept="image/*" 
+              multiple 
               className="hidden" 
               onChange={handleImageSelect}
             />
@@ -859,7 +1108,7 @@ export default function ChatApp() {
               type="button"
               onClick={() => fileInputRef.current?.click()}
               className="p-2 text-[#7f91a4] hover:text-white active:bg-[#242f3d] rounded-full shrink-0"
-              title="Rasm yuborish"
+              title="Bir nechta rasm yuborish"
             >
               <ImageIcon className="w-5 h-5 sm:w-6 sm:h-6" />
             </button>
@@ -894,11 +1143,18 @@ export default function ChatApp() {
             ) : (
               <button 
                 type="button"
-                onClick={handleStartRecording}
-                className="w-10 h-10 rounded-full bg-[#242f3d] active:bg-[#2f3f52] text-[#6ab2f2] shadow-md flex items-center justify-center shrink-0 active:scale-95 transition-transform cursor-pointer"
-                title="Ovozli xabar yozish"
+                onMouseDown={handleRecordButtonDown}
+                onMouseUp={handleRecordButtonUp}
+                onTouchStart={handleRecordButtonDown}
+                onTouchEnd={handleRecordButtonUp}
+                className="w-10 h-10 rounded-full bg-[#242f3d] active:bg-[#2f3f52] text-[#6ab2f2] shadow-md flex items-center justify-center shrink-0 active:scale-95 transition-all select-none cursor-pointer"
+                title={inputMode === 'voice' ? "Bosib turing - Ovoz, bir marta bosing - Video" : "Bosib turing - Video, bir marta bosing - Ovoz"}
               >
-                <Mic className="w-5 h-5" />
+                {inputMode === 'voice' ? (
+                  <Mic className="w-5 h-5 animate-in zoom-in-75 duration-100" />
+                ) : (
+                  <Video className="w-5 h-5 animate-in zoom-in-75 duration-100 text-emerald-400" />
+                )}
               </button>
             )}
           </form>
@@ -1025,6 +1281,28 @@ export default function ChatApp() {
               <span>Akkauntdan chiqish (Logout)</span>
             </button>
           </div>
+        </div>
+      )}
+
+      {/* TELEGRAM YUMALOQ VIDEO YOZISH PAYTIDA JONLI KAMERA KO'RINISHI */}
+      {isVideoRecording && (
+        <div className="absolute inset-0 z-40 bg-black/80 flex flex-col items-center justify-center p-4 select-none pointer-events-none">
+          <div className="relative w-64 h-64 rounded-full overflow-hidden border-4 border-emerald-400 shadow-[0_0_50px_rgba(52,211,153,0.5)]">
+            <video 
+              ref={liveVideoPreviewRef} 
+              autoPlay 
+              playsInline 
+              muted 
+              className="w-full h-full object-cover -scale-x-100" 
+            />
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-black/60 px-3 py-1 rounded-full text-xs text-white font-mono flex items-center space-x-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+              <span>{videoRecordingDuration}s</span>
+            </div>
+          </div>
+          <p className="text-xs text-white/80 mt-6 tracking-wide">
+            Qo‘yib yuborsangiz yuboriladi
+          </p>
         </div>
       )}
 
