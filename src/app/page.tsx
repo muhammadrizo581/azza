@@ -21,7 +21,10 @@ import {
   Video,
   Play,
   Pause,
-  Check
+  Check,
+  SwitchCamera,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { supabase, isSupabaseConfigured, Message } from '@/lib/supabase';
@@ -54,14 +57,18 @@ export default function ChatApp() {
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // TELEGRAM YUMALOQ VIDEO RECORDING
+  // TELEGRAM YUMALOQ VIDEO RECORDING & CAMERA FLIP
   const [isVideoRecording, setIsVideoRecording] = useState(false);
   const [videoRecordingDuration, setVideoRecordingDuration] = useState(0);
   const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
+  const [cameraFacingMode, setCameraFacingMode] = useState<'user' | 'environment'>('user');
   const videoChunksRef = useRef<Blob[]>([]);
   const videoRecorderRef = useRef<MediaRecorder | null>(null);
   const videoTimerRef = useRef<NodeJS.Timeout | null>(null);
   const liveVideoPreviewRef = useRef<HTMLVideoElement | null>(null);
+
+  // TELEGRAM YUMALOQ VIDEO CHATDA BOSILGANDA KATTALASHISH (EXPAND & SOUND)
+  const [expandedVideoId, setExpandedVideoId] = useState<string | null>(null);
 
   // AUDIO PLAYING
   const [playingAudio, setPlayingAudio] = useState<string | null>(null);
@@ -525,7 +532,7 @@ export default function ChatApp() {
   };
 
   // TELEGRAM YUMALOQ VIDEO (VIDEO NOTE) YOZISH
-  const handleStartVideoRecording = async () => {
+  const handleStartVideoRecording = async (facing: 'user' | 'environment' = cameraFacingMode) => {
     if (!navigator?.mediaDevices?.getUserMedia) {
       alert('Brauzeringiz kameraga ruxsat bermayapti');
       return;
@@ -533,7 +540,7 @@ export default function ChatApp() {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 480 }, aspectRatio: 1 },
+        video: { facingMode: facing, width: { ideal: 480 }, height: { ideal: 480 }, aspectRatio: 1 },
         audio: true
       });
 
@@ -623,6 +630,33 @@ export default function ChatApp() {
     }
   };
 
+  // KAMERANI O'GIRISH (OLD <-> ORQA KAMERA)
+  const handleFlipCamera = async (e?: React.MouseEvent) => {
+    if (e) {
+      e.stopPropagation();
+    }
+    const nextFacing = cameraFacingMode === 'user' ? 'environment' : 'user';
+    setCameraFacingMode(nextFacing);
+
+    if (videoStream) {
+      videoStream.getTracks().forEach(t => t.stop());
+    }
+
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: nextFacing, width: { ideal: 480 }, height: { ideal: 480 }, aspectRatio: 1 },
+        audio: true
+      });
+      setVideoStream(newStream);
+      if (liveVideoPreviewRef.current) {
+        liveVideoPreviewRef.current.srcObject = newStream;
+        liveVideoPreviewRef.current.play().catch(() => {});
+      }
+    } catch (e) {
+      console.error('Flip camera error:', e);
+    }
+  };
+
   const handleStopVideoRecording = () => {
     if (videoRecorderRef.current && isVideoRecording) {
       videoRecorderRef.current.stop();
@@ -650,9 +684,14 @@ export default function ChatApp() {
     }
   };
 
-  // TELEGRAM USLUBIDAGI MIC/VIDEO TUGMASI HANDLERLARI
-  const handleRecordButtonDown = () => {
+  // TELEGRAM USLUBIDAGI MIC/VIDEO TUGMASI: BOSIB TURISH (LONG PRESS) VA BITTA BOSISH
+  const handleRecordButtonDown = (e: React.SyntheticEvent) => {
+    e.preventDefault();
     isHoldingRecordRef.current = false;
+    if (pressTriggerTimerRef.current) {
+      clearTimeout(pressTriggerTimerRef.current);
+    }
+
     pressTriggerTimerRef.current = setTimeout(() => {
       isHoldingRecordRef.current = true;
       if (window.navigator?.vibrate) window.navigator.vibrate(50);
@@ -661,17 +700,18 @@ export default function ChatApp() {
       } else {
         handleStartVideoRecording();
       }
-    }, 280); // 280ms bosib tursa yozish boshlanadi
+    }, 320); // 320ms bosib tursa haqiqiy long press bo'ladi
   };
 
-  const handleRecordButtonUp = () => {
+  const handleRecordButtonUp = (e: React.SyntheticEvent) => {
+    e.preventDefault();
     if (pressTriggerTimerRef.current) {
       clearTimeout(pressTriggerTimerRef.current);
       pressTriggerTimerRef.current = null;
     }
 
     if (isHoldingRecordRef.current) {
-      // Bosib turilgan bo'lsa - qo'yib yuborganda yuboradi
+      // Bosib turilgan edi — qo'yib yuborganda yozishni to'xtatib yuboradi
       if (isRecording) {
         handleStopRecording();
       } else if (isVideoRecording) {
@@ -679,7 +719,7 @@ export default function ChatApp() {
       }
       isHoldingRecordRef.current = false;
     } else {
-      // Shunchaki bitta bosib qo'yib yuborsa - rejim almashadi (Mic <-> Video)
+      // Shunchaki bitta bosib qo'yib yubordi (click) — rejim almashadi (Mic <-> Video)!
       setInputMode((prev) => (prev === 'voice' ? 'video' : 'voice'));
       if (window.navigator?.vibrate) window.navigator.vibrate(20);
     }
@@ -891,17 +931,37 @@ export default function ChatApp() {
                   </div>
                 )}
 
-                {/* TELEGRAM YUMALOQ VIDEO (VIDEO NOTE) KO'RINISHI */}
+                {/* TELEGRAM YUMALOQ VIDEO (VIDEO NOTE) KO'RINISHI - BOSGANDA KATTALASHADI VA OVOZ YOQILADI */}
                 {msg.media_type === 'video_note' && msg.media_url && (
                   <div className="py-1">
-                    <div className="w-56 h-56 rounded-full overflow-hidden border-2 border-[#6ab2f2] shadow-2xl relative bg-black mx-auto">
+                    <div 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setExpandedVideoId(prev => (prev === msg.id ? null : msg.id));
+                      }}
+                      className={`relative rounded-full overflow-hidden border-2 border-[#6ab2f2] shadow-2xl bg-black mx-auto transition-all duration-300 cursor-pointer ${
+                        expandedVideoId === msg.id 
+                          ? 'w-64 h-64 scale-100 ring-4 ring-[#6ab2f2]/40' 
+                          : 'w-40 h-40 hover:scale-[1.02]'
+                      }`}
+                    >
                       <video 
                         src={msg.media_url} 
                         playsInline 
+                        autoPlay
                         loop 
-                        controls
+                        muted={expandedVideoId !== msg.id}
                         className="w-full h-full object-cover"
                       />
+
+                      {/* Ovoz va holat belgisi */}
+                      <div className="absolute bottom-2 right-2 bg-black/60 backdrop-blur-xs p-1.5 rounded-full text-white/90">
+                        {expandedVideoId === msg.id ? (
+                          <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+                        ) : (
+                          <VolumeX className="w-3.5 h-3.5 text-white/70" />
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1286,23 +1346,52 @@ export default function ChatApp() {
 
       {/* TELEGRAM YUMALOQ VIDEO YOZISH PAYTIDA JONLI KAMERA KO'RINISHI */}
       {isVideoRecording && (
-        <div className="absolute inset-0 z-40 bg-black/80 flex flex-col items-center justify-center p-4 select-none pointer-events-none">
-          <div className="relative w-64 h-64 rounded-full overflow-hidden border-4 border-emerald-400 shadow-[0_0_50px_rgba(52,211,153,0.5)]">
+        <div className="absolute inset-0 z-40 bg-black/85 flex flex-col items-center justify-center p-4 select-none animate-in fade-in duration-200">
+          
+          {/* Yuqoridagi Kamera Aylantirish (Flip) va Bekor qilish paneli */}
+          <div className="absolute top-6 w-full max-w-sm px-6 flex items-center justify-between z-50">
+            <button
+              type="button"
+              onClick={handleCancelVideoRecording}
+              className="px-3.5 py-1.5 rounded-full bg-white/15 active:bg-white/25 text-white text-xs font-medium backdrop-blur-md"
+            >
+              Bekor qilish
+            </button>
+
+            {/* KAMERANI ORQA/OLDIGA O'GIRISH TUGMASI (FLIP CAMERA) */}
+            <button
+              type="button"
+              onClick={handleFlipCamera}
+              className="p-3 rounded-full bg-white/20 active:bg-white/35 text-white backdrop-blur-md shadow-lg active:scale-95 transition-transform"
+              title="Kamerani o‘girish (Orqa / Oldi)"
+            >
+              <SwitchCamera className="w-5 h-5 text-emerald-300 animate-in spin-in-180 duration-200" />
+            </button>
+          </div>
+
+          {/* TELEGRAM USLUBIDAGI YUMALOQ KAMERA OYNASI */}
+          <div className="relative w-64 h-64 rounded-full overflow-hidden border-4 border-emerald-400 shadow-[0_0_60px_rgba(52,211,153,0.6)] bg-black">
             <video 
               ref={liveVideoPreviewRef} 
               autoPlay 
               playsInline 
               muted 
-              className="w-full h-full object-cover -scale-x-100" 
+              className={`w-full h-full object-cover ${cameraFacingMode === 'user' ? '-scale-x-100' : ''}`} 
             />
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-black/60 px-3 py-1 rounded-full text-xs text-white font-mono flex items-center space-x-1.5">
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur-md px-3 py-1 rounded-full text-xs text-white font-mono flex items-center space-x-1.5 shadow">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
               <span>{videoRecordingDuration}s</span>
             </div>
           </div>
-          <p className="text-xs text-white/80 mt-6 tracking-wide">
-            Qo‘yib yuborsangiz yuboriladi
-          </p>
+
+          <div className="mt-6 flex flex-col items-center space-y-2">
+            <p className="text-xs text-white/90 font-medium tracking-wide">
+              Yozish ketmoqda • Qo‘yib yuborsangiz yuboriladi
+            </p>
+            <span className="text-[11px] text-emerald-400/80">
+              Tepadagi tugma orqali orqa kameraga o‘tkaza olasiz 🔄
+            </span>
+          </div>
         </div>
       )}
 
