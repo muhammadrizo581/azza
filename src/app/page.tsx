@@ -31,6 +31,66 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { supabase, isSupabaseConfigured, Message } from '@/lib/supabase';
+import { 
+  getCachedMessages, 
+  saveMessagesCache, 
+  mergeMessageLists, 
+  clearChatCache 
+} from '@/lib/chatStorage';
+
+// RASMLARNI SIFATLI VA TEZKOR QISQARTIRISH (KVOTA TO'LIB QOLMASLIGI UCHUN)
+function compressImageFile(file: File): Promise<string> {
+  return new Promise((resolve) => {
+    if (file.size < 120 * 1024) {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(file);
+      return;
+    }
+
+    const img = new window.Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const MAX_DIM = 1280;
+      let { width, height } = img;
+      if (width > height) {
+        if (width > MAX_DIM) {
+          height = Math.round((height * MAX_DIM) / width);
+          width = MAX_DIM;
+        }
+      } else {
+        if (height > MAX_DIM) {
+          width = Math.round((width * MAX_DIM) / height);
+          height = MAX_DIM;
+        }
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', 0.82));
+      } else {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(file);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(file);
+    };
+    img.src = url;
+  });
+}
 
 // VAQTNI FORMATLASH (0:05, 1:24)
 function formatDuration(sec?: number) {
@@ -469,7 +529,7 @@ export default function ChatApp() {
     }
   }, [isVideoRecording, videoStream]);
 
-  // 1. Ekran ochilishi bilan xotiradan login va keshdagi xabarlarni lahzada (instant) yuklash
+  // 1. Ekran ochilishi bilan xotiradan (IndexedDB + localStorage) barcha xabarlarni lahzada (instant) yuklash
   useEffect(() => {
     try {
       const savedUser = localStorage.getItem('azza_auth_user');
@@ -493,6 +553,13 @@ export default function ChatApp() {
     } finally {
       setIsAuthChecking(false);
     }
+
+    // Xotiradan (IndexedDB) barcha xabarlarni cheklovlarsiz to'liq yuklash
+    getCachedMessages().then((cached) => {
+      if (cached && cached.length > 0) {
+        setMessages((prev) => (prev.length === 0 ? cached : mergeMessageLists(prev, cached)));
+      }
+    }).catch(() => {});
   }, []);
 
   // Oxirgi kirgan vaqtni har 30 soniyada yangilab turish (masalan: "hozirgina chiqdi" -> "1 daqiqa oldin...")
@@ -504,16 +571,11 @@ export default function ChatApp() {
     return () => clearInterval(timer);
   }, []);
 
-  // Xabarlar har o'zgarganda keshni yangilab borish
+  // Xabarlar har o'zgarganda xotiraga (IndexedDB) saqlab borish
   const updateMessagesState = (updater: Message[] | ((prev: Message[]) => Message[])) => {
     setMessages((prev) => {
       const next = typeof updater === 'function' ? updater(prev) : updater;
-      try {
-        localStorage.setItem('azza_chat_cache', JSON.stringify(next));
-      } catch (err) {
-        // Agar xotira to'lsa (katta rasm/audioda)
-        console.warn('Cache quota exceeded:', err);
-      }
+      saveMessagesCache(next);
       return next;
     });
   };
@@ -560,21 +622,44 @@ export default function ChatApp() {
     };
   };
 
-  // 2. Xabarlarni Supabase orqali yuklash (Ultra-fast)
+  // 2. Xabarlarni Supabase orqali yuklash (Barcha xabarlarni to'liq, 100% bittada yuklash)
   const loadMessages = async () => {
     if (!supabase || currentUser === 'guest') return;
     try {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .order('created_at', { ascending: true })
-        .limit(200);
+      let allRows: any[] = [];
+      let page = 0;
+      const pageSize = 1000;
+      let hasMore = true;
 
-      if (!error && data) {
+      while (hasMore) {
+        const { data, error } = await supabase
+          .from('messages')
+          .select('*')
+          .order('created_at', { ascending: true })
+          .range(page * pageSize, (page + 1) * pageSize - 1);
+
+        if (error) {
+          console.error('Supabase fetch error:', error);
+          break;
+        }
+
+        if (data && data.length > 0) {
+          allRows.push(...data);
+          if (data.length < pageSize) {
+            hasMore = false;
+          } else {
+            page++;
+          }
+        } else {
+          hasMore = false;
+        }
+      }
+
+      if (allRows.length > 0) {
         const partnerKey = currentUser === 'me' ? 'partner' : 'me';
 
         // Sherikning oxirgi ko'ringan vaqtini olish
-        const statusRow = data.find((r: any) => 
+        const statusRow = allRows.find((r: any) => 
           r.id === `status_${partnerKey}` || 
           (typeof r.text === 'string' && r.text.startsWith('__STATUS__:') && r.sender_id === partnerKey)
         );
@@ -589,12 +674,14 @@ export default function ChatApp() {
         }
 
         // Status qatorlarini chat xabarlaridan chiqarib tashlaymiz
-        const chatRows = data.filter((r: any) => 
+        const chatRows = allRows.filter((r: any) => 
           !r.id?.startsWith('status_') && 
           !(typeof r.text === 'string' && r.text.startsWith('__STATUS__:'))
         );
         const parsedList = chatRows.map(parseIncomingMsg);
-        updateMessagesState(parsedList);
+        
+        // Keshdagi va serverdan kelgan barcha xabarlarni birortasini yo'qotmasdan birlashtiramiz
+        updateMessagesState((prev) => mergeMessageLists(prev, parsedList));
       }
     } catch (e) {
       console.error('Fetch error:', e);
@@ -780,6 +867,8 @@ export default function ChatApp() {
 
   const handleLogout = () => {
     try { localStorage.removeItem('azza_auth_user'); } catch {}
+    clearChatCache();
+    setMessages([]);
     setCurrentUser('guest');
     setPasswordInput('');
     setAuthError('');
@@ -1185,15 +1274,8 @@ export default function ChatApp() {
     if (!files || files.length === 0 || currentUser === 'guest') return;
 
     const fileList = Array.from(files);
-    const readBase64 = (file: File): Promise<string> => {
-      return new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.readAsDataURL(file);
-      });
-    };
-
-    const base64List = await Promise.all(fileList.map(readBase64));
+    const base64List = (await Promise.all(fileList.map(compressImageFile))).filter(Boolean);
+    if (base64List.length === 0) return;
 
     const currentReply = replyingToRef.current || replyingTo;
     const replyData = currentReply ? {
