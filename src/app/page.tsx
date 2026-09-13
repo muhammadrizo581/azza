@@ -632,10 +632,48 @@ export default function ChatApp() {
     };
   };
 
-  // 2. Xabarlarni Supabase orqali yuklash (Barcha xabarlarni to'liq, 100% bittada yuklash)
+  // 2. Xabarlarni Supabase orqali ultra-tezkor (2 bosqichli) yuklash
   const loadMessages = async () => {
     if (!supabase || currentUser === 'guest') return;
+    const partnerKey = currentUser === 'me' ? 'partner' : 'me';
+
     try {
+      // 1-BOSQICH: ENG YANGI 40 TA XABARNI BIR LAHZADA (50-80ms) YUKLASH
+      // Bu foydalanuvchiga kutmasdan eng oxirgi xabarlar, galochkalar va reaksiyalarni ko'rsatadi
+      const { data: recentRows, error: recentError } = await supabase
+        .from('messages')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(40);
+
+      if (!recentError && recentRows && recentRows.length > 0) {
+        // Chronological tartibga keltiramiz
+        recentRows.reverse();
+
+        // Sherikning oxirgi ko'ringan vaqtini olish
+        const statusRow = recentRows.find((r: any) => 
+          r.id === `status_${partnerKey}` || 
+          (typeof r.text === 'string' && r.text.startsWith('__STATUS__:') && r.sender_id === partnerKey)
+        );
+        if (statusRow) {
+          try {
+            const parsed = JSON.parse(statusRow.text.replace('__STATUS__:', ''));
+            if (parsed.last_seen) {
+              setPartnerLastSeen(parsed.last_seen);
+              try { localStorage.setItem(`azza_last_seen_${partnerKey}`, parsed.last_seen); } catch {}
+            }
+          } catch {}
+        }
+
+        const chatRecent = recentRows
+          .filter((r: any) => !r.id?.startsWith('status_') && !(typeof r.text === 'string' && r.text.startsWith('__STATUS__:')))
+          .map(parseIncomingMsg);
+
+        // Darhol ekranga chiqaramiz
+        updateMessagesState((prev) => mergeMessageLists(prev, chatRecent));
+      }
+
+      // 2-BOSQICH: FONDA BUTUN TARIXNI (OLDINGI BARCHA XABARLARNI) TO'LIQ YUKLASH
       let allRows: any[] = [];
       let page = 0;
       const pageSize = 1000;
@@ -648,10 +686,7 @@ export default function ChatApp() {
           .order('created_at', { ascending: true })
           .range(page * pageSize, (page + 1) * pageSize - 1);
 
-        if (error) {
-          console.error('Supabase fetch error:', error);
-          break;
-        }
+        if (error) break;
 
         if (data && data.length > 0) {
           allRows.push(...data);
@@ -666,24 +701,6 @@ export default function ChatApp() {
       }
 
       if (allRows.length > 0) {
-        const partnerKey = currentUser === 'me' ? 'partner' : 'me';
-
-        // Sherikning oxirgi ko'ringan vaqtini olish
-        const statusRow = allRows.find((r: any) => 
-          r.id === `status_${partnerKey}` || 
-          (typeof r.text === 'string' && r.text.startsWith('__STATUS__:') && r.sender_id === partnerKey)
-        );
-        if (statusRow) {
-          try {
-            const parsed = JSON.parse(statusRow.text.replace('__STATUS__:', ''));
-            if (parsed.last_seen) {
-              setPartnerLastSeen(parsed.last_seen);
-              try { localStorage.setItem(`azza_last_seen_${partnerKey}`, parsed.last_seen); } catch {}
-            }
-          } catch {}
-        }
-
-        // Status qatorlarini chat xabarlaridan chiqarib tashlaymiz
         const chatRows = allRows.filter((r: any) => 
           !r.id?.startsWith('status_') && 
           !(typeof r.text === 'string' && r.text.startsWith('__STATUS__:'))
@@ -765,7 +782,12 @@ export default function ChatApp() {
         } else if (payload.eventType === 'UPDATE') {
           const updatedMsg = parseIncomingMsg(payload.new);
           updateMessagesState((prev) => {
-            return prev.map((m) => (m.id === updatedMsg.id ? updatedMsg : m));
+            return prev.map((m) => (m.id === updatedMsg.id ? {
+              ...m,
+              ...updatedMsg,
+              media_url: updatedMsg.media_url || m.media_url,
+              media_urls: (updatedMsg.media_urls && updatedMsg.media_urls.length > 0) ? updatedMsg.media_urls : m.media_urls
+            } : m));
           });
         } else if (payload.eventType === 'DELETE') {
           const deletedId = (payload.old as { id: string }).id;
@@ -854,21 +876,17 @@ export default function ChatApp() {
 
   // XABARLARNI O'QILGAN DEB BELGILASH (MARK AS READ)
   const markPartnerMessagesAsRead = useCallback(async () => {
-    if (!supabase || currentUser === 'guest' || typeof document === 'undefined' || document.visibilityState === 'hidden') return;
+    if (!supabase || currentUser === 'guest') return;
     const partnerKey = currentUser === 'me' ? 'partner' : 'me';
 
-    let hasUnread = false;
+    // 1. Darhol lokal state va xotirada sherik xabarlarini is_read: true qilamiz
     updateMessagesState((prev) => {
-      if (prev.some((m) => m.sender_id === partnerKey && !m.is_read)) {
-        hasUnread = true;
-        return prev.map((m) => (m.sender_id === partnerKey && !m.is_read ? { ...m, is_read: true } : m));
-      }
-      return prev;
+      const hasUnread = prev.some((m) => m.sender_id === partnerKey && !m.is_read);
+      if (!hasUnread) return prev;
+      return prev.map((m) => (m.sender_id === partnerKey && !m.is_read ? { ...m, is_read: true } : m));
     });
 
-    if (!hasUnread) return;
-
-    // 1. Realtime orqali sherik tomonga uzatish (u tomonda lahzada 2 ta ko'k galochkaga aylanadi)
+    // 2. Realtime orqali sherik tomonga uzatamiz (sherik ekranida darhol 2 ta ko'k galochka bo'ladi)
     if (realtimeChannelRef.current) {
       realtimeChannelRef.current.send({
         type: 'broadcast',
@@ -877,46 +895,52 @@ export default function ChatApp() {
       }).catch(() => {});
     }
 
-    // 2. Supabase bazasida sherik xabarlarini is_read = true qilish
+    // 3. Supabase bazasida sherik xabarlarini is_read = true qilamiz
     try {
       await supabase
         .from('messages')
         .update({ is_read: true })
         .eq('sender_id', partnerKey)
-        .eq('is_read', false);
+        .or('is_read.is.null,is_read.eq.false');
     } catch (e) {
       console.error('Error updating read status in DB:', e);
     }
   }, [currentUser]);
 
-  // Xabarlar kelganda yoki sahifa faol bo'lganda avtomatik o'qildi qilish
+  // Xabarlar kelganda yoki sahifa ochilganda avtomatik o'qildi qilish
   useEffect(() => {
-    if (currentUser !== 'guest' && typeof document !== 'undefined' && document.visibilityState === 'visible') {
+    if (currentUser !== 'guest') {
       const partnerKey = currentUser === 'me' ? 'partner' : 'me';
       const hasUnread = messages.some((m) => m.sender_id === partnerKey && !m.is_read);
       if (hasUnread) {
         const timer = setTimeout(() => {
           markPartnerMessagesAsRead();
-        }, 400);
+        }, 200);
         return () => clearTimeout(timer);
       }
     }
   }, [messages, currentUser, markPartnerMessagesAsRead]);
 
-  // Foydalanuvchi ilovaga qaytganda o'qilmagan xabarlarni o'qildi qilish
+  // Foydalanuvchi ekranga qaytganda yoki ekranga teginganda o'qilmagan xabarlarni o'qildi qilish
   useEffect(() => {
+    if (currentUser === 'guest') return;
     const handleActive = () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+      const partnerKey = currentUser === 'me' ? 'partner' : 'me';
+      if (messages.some((m) => m.sender_id === partnerKey && !m.is_read)) {
         markPartnerMessagesAsRead();
       }
     };
     window.addEventListener('focus', handleActive);
+    window.addEventListener('click', handleActive);
+    window.addEventListener('touchstart', handleActive, { passive: true });
     window.addEventListener('visibilitychange', handleActive);
     return () => {
       window.removeEventListener('focus', handleActive);
+      window.removeEventListener('click', handleActive);
+      window.removeEventListener('touchstart', handleActive);
       window.removeEventListener('visibilitychange', handleActive);
     };
-  }, [markPartnerMessagesAsRead]);
+  }, [currentUser, messages, markPartnerMessagesAsRead]);
 
   // Pastga scroll qilish
   useEffect(() => {
@@ -935,23 +959,25 @@ export default function ChatApp() {
     }
     const cleanPass = passwordInput.trim().toLowerCase();
 
-    if (cleanPass === 's0nd') {
-      setCurrentUser('me');
-      try { localStorage.setItem('azza_auth_user', 'me'); } catch {}
+    if (cleanPass === 's0nd' || cleanPass === 'aziza') {
+      const user = cleanPass === 's0nd' ? 'me' : 'partner';
+      setCurrentUser(user);
+      try { localStorage.setItem('azza_auth_user', user); } catch {}
       setAuthError('');
-    } else if (cleanPass === 'aziza') {
-      setCurrentUser('partner');
-      try { localStorage.setItem('azza_auth_user', 'partner'); } catch {}
-      setAuthError('');
+
+      // Xotiradan (IndexedDB) barcha chatlarni bir zumda (0ms) ko'rsatish
+      getCachedMessages().then((cached) => {
+        if (cached && cached.length > 0) {
+          setMessages(cached);
+        }
+      }).catch(() => {});
     } else {
-      setAuthError('Noto‘g‘ri parol! Parol faqat: aziza yoki s0nd');
+      setAuthError('Noto‘g‘ri parol!');
     }
   };
 
   const handleLogout = () => {
     try { localStorage.removeItem('azza_auth_user'); } catch {}
-    clearChatCache();
-    setMessages([]);
     setCurrentUser('guest');
     setPasswordInput('');
     setAuthError('');
