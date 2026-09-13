@@ -29,6 +29,115 @@ import {
 import confetti from 'canvas-confetti';
 import { supabase, isSupabaseConfigured, Message } from '@/lib/supabase';
 
+// VAQTNI FORMATLASH (0:05, 1:24)
+function formatDuration(sec?: number) {
+  if (!sec || isNaN(sec) || sec <= 0) return '0:01';
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s < 10 ? '0' : ''}${s}`;
+}
+
+// TELEGRAM YUMALOQ VIDEO NOTE KOMPONENTI (TORTBURCHAKSIZ, BORDERSIZ, TOZA YUMALOQ)
+function TelegramVideoNote({
+  msg,
+  isMe,
+  time,
+  isSelected,
+  onTouchStart,
+  onTouchEnd,
+  onContextMenu,
+}: {
+  msg: Message;
+  isMe: boolean;
+  time: string;
+  isSelected: boolean;
+  onTouchStart: () => void;
+  onTouchEnd: () => void;
+  onContextMenu: (e: React.MouseEvent) => void;
+}) {
+  const [isPlayingWithSound, setIsPlayingWithSound] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = true;
+    video.defaultMuted = true;
+    video.playsInline = true;
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
+    video.play().catch(() => {});
+  }, [msg.media_url]);
+
+  const handleToggleSound = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (isPlayingWithSound) {
+      video.muted = true;
+      setIsPlayingWithSound(false);
+      setIsExpanded(false);
+    } else {
+      video.muted = false;
+      video.currentTime = 0;
+      video.play().catch(() => {});
+      setIsPlayingWithSound(true);
+      setIsExpanded(true);
+    }
+  };
+
+  return (
+    <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} my-2 select-none`}>
+      <div
+        onTouchStart={onTouchStart}
+        onTouchEnd={onTouchEnd}
+        onMouseDown={onTouchStart}
+        onMouseUp={onTouchEnd}
+        onContextMenu={onContextMenu}
+        onClick={handleToggleSound}
+        className={`relative cursor-pointer transition-all duration-300 ${
+          isExpanded ? 'w-64 h-64 sm:w-72 sm:h-72' : 'w-44 h-44 sm:w-48 sm:h-48'
+        } ${isSelected ? 'ring-3 ring-[#6ab2f2] rounded-full' : ''}`}
+      >
+        {/* YUMALOQ VIDEO — BORDERSIZ, TORTBURCHAKSIZ TOZA TELEGRAM YUMALOQ VIDEO */}
+        <div className="w-full h-full rounded-full overflow-hidden shadow-2xl bg-[#17212b] relative group">
+          <video
+            ref={videoRef}
+            src={msg.media_url}
+            autoPlay
+            loop
+            playsInline
+            muted
+            className="w-full h-full object-cover rounded-full"
+            onLoadedMetadata={(e) => {
+              const v = e.currentTarget;
+              v.muted = !isPlayingWithSound;
+              v.play().catch(() => {});
+            }}
+          />
+
+          {/* OVOZ HOLATI (TOP RIGHT) */}
+          <div className="absolute top-2.5 right-2.5 bg-black/60 backdrop-blur-md p-1.5 rounded-full text-white/90 shadow pointer-events-none">
+            {isPlayingWithSound ? (
+              <Volume2 className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+            ) : (
+              <VolumeX className="w-3.5 h-3.5 text-white/70" />
+            )}
+          </div>
+
+          {/* VAQT VA STATUS (BOTTOM RIGHT) — YUMALOQ ICHIDA SLEEK GLASS BADGE */}
+          <div className="absolute bottom-2.5 right-2.5 bg-black/60 backdrop-blur-md px-2 py-0.5 rounded-full flex items-center space-x-1 text-[10px] text-white/90 shadow pointer-events-none">
+            <span>{time}</span>
+            {isMe && <CheckCheck className="w-3 h-3 text-[#6ab2f2]" />}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ChatApp() {
   const [currentUser, setCurrentUser] = useState<'guest' | 'me' | 'partner'>('guest');
   const [isAuthChecking, setIsAuthChecking] = useState(true);
@@ -53,15 +162,20 @@ export default function ChatApp() {
   // VOICE RECORDING
   const [isRecording, setIsRecording] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
+  const recordingDurationRef = useRef<number>(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // TELEGRAM YUMALOQ VIDEO RECORDING & CAMERA FLIP
+  // TELEGRAM YUMALOQ VIDEO RECORDING, CAMERA FLIP VA QULF (LOCK)
   const [isVideoRecording, setIsVideoRecording] = useState(false);
   const [videoRecordingDuration, setVideoRecordingDuration] = useState(0);
+  const videoRecordingDurationRef = useRef<number>(0);
   const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
   const [cameraFacingMode, setCameraFacingMode] = useState<'user' | 'environment'>('user');
+  const [isRecordLocked, setIsRecordLocked] = useState(false);
+  const isRecordLockedRef = useRef<boolean>(false);
+  const recordTouchStartYRef = useRef<number>(0);
   const videoChunksRef = useRef<Blob[]>([]);
   const videoRecorderRef = useRef<MediaRecorder | null>(null);
   const videoTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -159,6 +273,7 @@ export default function ChatApp() {
     let media_url = raw.media_url || undefined;
     let media_urls = raw.media_urls || undefined;
     let media_type = raw.media_type || undefined;
+    let duration = raw.duration || undefined;
     let is_edited = raw.is_edited || false;
 
     // Agar text ichida maxsus json format saqlangan bo'lsa
@@ -169,6 +284,7 @@ export default function ChatApp() {
         media_url = parsed.media_url || media_url;
         media_urls = parsed.media_urls || media_urls;
         media_type = parsed.media_type || media_type;
+        duration = parsed.duration !== undefined ? parsed.duration : duration;
         is_edited = parsed.is_edited !== undefined ? parsed.is_edited : is_edited;
       } catch {}
     }
@@ -180,6 +296,7 @@ export default function ChatApp() {
       media_url,
       media_urls,
       media_type,
+      duration,
       is_edited,
       is_read: raw.is_read || false,
       created_at: raw.created_at
@@ -492,6 +609,7 @@ export default function ChatApp() {
       mediaRecorder.onstop = async () => {
         const selectedType = mimeType || mediaRecorder.mimeType || 'audio/mp4';
         const audioBlob = new Blob(audioChunksRef.current, { type: selectedType });
+        const finalVoiceDuration = Math.max(recordingDurationRef.current, 1);
         const reader = new FileReader();
         reader.onloadend = async () => {
           const base64Audio = reader.result as string;
@@ -502,6 +620,7 @@ export default function ChatApp() {
             text: '', // Matn yo'q, Telegramdek faqat audio pleyer
             media_url: base64Audio,
             media_type: 'voice',
+            duration: finalVoiceDuration,
             is_read: false,
             created_at: new Date().toISOString()
           };
@@ -512,7 +631,8 @@ export default function ChatApp() {
             const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({
               text: '',
               media_url: base64Audio,
-              media_type: 'voice'
+              media_type: 'voice',
+              duration: finalVoiceDuration
             })}`;
 
             await supabase.from('messages').insert([
@@ -532,10 +652,12 @@ export default function ChatApp() {
 
       mediaRecorder.start(250);
       setIsRecording(true);
+      recordingDurationRef.current = 0;
       setRecordingDuration(0);
 
       recordingTimerRef.current = setInterval(() => {
-        setRecordingDuration((prev) => prev + 1);
+        recordingDurationRef.current += 1;
+        setRecordingDuration(recordingDurationRef.current);
       }, 1000);
     } catch (err: unknown) {
       console.error("Mic error:", err);
@@ -642,8 +764,18 @@ export default function ChatApp() {
         }
       }
 
-      const options = mimeType ? { mimeType } : undefined;
-      const mediaRecorder = new MediaRecorder(stream, options);
+      const options: MediaRecorderOptions = {
+        mimeType: mimeType || undefined,
+        videoBitsPerSecond: 900000, // 900 kbps: ultra yengil, tezkor va ravshan yumaloq video
+        audioBitsPerSecond: 64000
+      };
+
+      let mediaRecorder: MediaRecorder;
+      try {
+        mediaRecorder = new MediaRecorder(stream, options);
+      } catch {
+        mediaRecorder = new MediaRecorder(stream);
+      }
       videoRecorderRef.current = mediaRecorder;
       videoChunksRef.current = [];
 
@@ -656,6 +788,8 @@ export default function ChatApp() {
       mediaRecorder.onstop = async () => {
         const isCancelled = videoCancelledRef.current;
         videoCancelledRef.current = false;
+        isRecordLockedRef.current = false;
+        setIsRecordLocked(false);
 
         // Barcha treklar to'xtatiladi
         stream.getTracks().forEach((track) => track.stop());
@@ -675,6 +809,7 @@ export default function ChatApp() {
 
         if (videoBlob.size === 0) return;
 
+        const finalVideoDuration = Math.max(videoRecordingDurationRef.current, 1);
         const reader = new FileReader();
         reader.onloadend = async () => {
           const base64Video = reader.result as string;
@@ -685,6 +820,7 @@ export default function ChatApp() {
             text: '',
             media_url: base64Video,
             media_type: 'video_note',
+            duration: finalVideoDuration,
             is_read: false,
             created_at: new Date().toISOString()
           };
@@ -695,7 +831,8 @@ export default function ChatApp() {
             const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({
               text: '',
               media_url: base64Video,
-              media_type: 'video_note'
+              media_type: 'video_note',
+              duration: finalVideoDuration
             })}`;
 
             await supabase.from('messages').insert([
@@ -715,9 +852,12 @@ export default function ChatApp() {
       mediaRecorder.start(250);
       isStartingVideoRef.current = false;
       isVideoRecordingRef.current = true;
+      videoRecordingDurationRef.current = 0;
+      setVideoRecordingDuration(0);
 
       videoTimerRef.current = setInterval(() => {
-        setVideoRecordingDuration((prev) => prev + 1);
+        videoRecordingDurationRef.current += 1;
+        setVideoRecordingDuration(videoRecordingDurationRef.current);
       }, 1000);
 
       // Agar foydalanuvchi kamera yuklanayotganda barmog'ini qo'yib yuborgan bo'lsa
@@ -732,6 +872,8 @@ export default function ChatApp() {
       setIsVideoRecording(false);
       isStartingVideoRef.current = false;
       isVideoRecordingRef.current = false;
+      isRecordLockedRef.current = false;
+      setIsRecordLocked(false);
       setVideoStream(null);
       videoStreamRef.current = null;
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -785,6 +927,9 @@ export default function ChatApp() {
   };
 
   const handleStopVideoRecording = () => {
+    isRecordLockedRef.current = false;
+    setIsRecordLocked(false);
+
     if (videoTimerRef.current) {
       clearInterval(videoTimerRef.current);
       videoTimerRef.current = null;
@@ -815,6 +960,8 @@ export default function ChatApp() {
     videoCancelledRef.current = true;
     shouldSendOnReadyRef.current = false;
     isHoldingRecordRef.current = false;
+    isRecordLockedRef.current = false;
+    setIsRecordLocked(false);
 
     if (pressTriggerTimerRef.current) {
       clearTimeout(pressTriggerTimerRef.current);
@@ -848,6 +995,15 @@ export default function ChatApp() {
   const handleRecordButtonDown = (e: React.SyntheticEvent) => {
     e.preventDefault();
     isHoldingRecordRef.current = false;
+    isRecordLockedRef.current = false;
+    setIsRecordLocked(false);
+
+    // Boshlang'ich Y pozitsiyani saqlash (Swipe up qulf uchun)
+    const clientY = 'touches' in e && (e as any).touches?.[0]
+      ? (e as any).touches[0].clientY
+      : 'clientY' in e ? (e as any).clientY : 0;
+    recordTouchStartYRef.current = clientY;
+
     if (pressTriggerTimerRef.current) {
       clearTimeout(pressTriggerTimerRef.current);
     }
@@ -872,6 +1028,11 @@ export default function ChatApp() {
       pressTriggerTimerRef.current = null;
     }
 
+    // AGAR QULFLANGAN BO'LSA — BARMOQNI QO'YIB YUBORGANDA YUBORILMAYDI (HANDS-FREE)!
+    if (isRecordLockedRef.current) {
+      return;
+    }
+
     if (isHoldingRecordRef.current || isStartingVideoRef.current || isVideoRecordingRef.current) {
       isHoldingRecordRef.current = false;
       if (isRecording) {
@@ -886,9 +1047,28 @@ export default function ChatApp() {
     }
   };
 
-  // Har qanday joyda barmoqni qo'yib yuborganda yozishni to'xtatib yuborish
+  // BARMOQNI TEPAGA SURGANDA (SWIPE UP) — AVTOMATIK QULFLASH (LOCK)
+  const handleTouchMoveRecord = (e: TouchEvent | MouseEvent) => {
+    if (!isHoldingRecordRef.current && !isVideoRecordingRef.current) return;
+    if (isRecordLockedRef.current) return;
+
+    const clientY = 'touches' in e && (e as TouchEvent).touches?.[0]
+      ? (e as TouchEvent).touches[0].clientY
+      : 'clientY' in e ? (e as MouseEvent).clientY : 0;
+
+    const deltaY = recordTouchStartYRef.current - clientY;
+    if (deltaY > 50) {
+      isRecordLockedRef.current = true;
+      setIsRecordLocked(true);
+      isHoldingRecordRef.current = false; // Barmoqni ushlab turishi shart emas!
+      if (window.navigator?.vibrate) window.navigator.vibrate([40, 40]);
+    }
+  };
+
+  // Har qanday joyda barmoqni qo'yib yuborganda yoki harakatlantirganda
   useEffect(() => {
     const handleGlobalWindowRelease = () => {
+      if (isRecordLockedRef.current) return;
       if (isHoldingRecordRef.current || isStartingVideoRef.current || isVideoRecordingRef.current) {
         handleRecordButtonUp();
       }
@@ -896,10 +1076,14 @@ export default function ChatApp() {
 
     window.addEventListener('mouseup', handleGlobalWindowRelease);
     window.addEventListener('touchend', handleGlobalWindowRelease);
+    window.addEventListener('touchmove', handleTouchMoveRecord);
+    window.addEventListener('mousemove', handleTouchMoveRecord);
 
     return () => {
       window.removeEventListener('mouseup', handleGlobalWindowRelease);
       window.removeEventListener('touchend', handleGlobalWindowRelease);
+      window.removeEventListener('touchmove', handleTouchMoveRecord);
+      window.removeEventListener('mousemove', handleTouchMoveRecord);
     };
   }, [isRecording]);
 
@@ -1059,6 +1243,26 @@ export default function ChatApp() {
           const time = new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
           const isMsgSelected = selectedMessage?.id === msg.id;
 
+          // TELEGRAM YUMALOQ VIDEO (TORTBURCHAKSIZ, TOZA YUMALOQ VA BORDERSIZ)
+          if (msg.media_type === 'video_note' && msg.media_url) {
+            return (
+              <TelegramVideoNote
+                key={msg.id}
+                msg={msg}
+                isMe={isMe}
+                time={time}
+                isSelected={isMsgSelected}
+                onTouchStart={() => handleTouchStart(msg)}
+                onTouchEnd={handleTouchEnd}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setSelectedMessage(msg);
+                }}
+              />
+            );
+          }
+
+          // ODDIY XABARLAR (TEXT, RASM, GOLOS) - PUFAKCHA BILAN
           return (
             <div 
               key={msg.id}
@@ -1109,42 +1313,7 @@ export default function ChatApp() {
                   </div>
                 )}
 
-                {/* TELEGRAM YUMALOQ VIDEO (VIDEO NOTE) KO'RINISHI - BOSGANDA KATTALASHADI VA OVOZ YOQILADI */}
-                {msg.media_type === 'video_note' && msg.media_url && (
-                  <div className="py-1">
-                    <div 
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setExpandedVideoId(prev => (prev === msg.id ? null : msg.id));
-                      }}
-                      className={`relative rounded-full overflow-hidden border-2 border-[#6ab2f2] shadow-2xl bg-black mx-auto transition-all duration-300 cursor-pointer ${
-                        expandedVideoId === msg.id 
-                          ? 'w-64 h-64 scale-100 ring-4 ring-[#6ab2f2]/40' 
-                          : 'w-40 h-40 hover:scale-[1.02]'
-                      }`}
-                    >
-                      <video 
-                        src={msg.media_url} 
-                        playsInline 
-                        autoPlay
-                        loop 
-                        muted={expandedVideoId !== msg.id}
-                        className="w-full h-full object-cover"
-                      />
-
-                      {/* Ovoz va holat belgisi */}
-                      <div className="absolute bottom-2 right-2 bg-black/60 backdrop-blur-xs p-1.5 rounded-full text-white/90">
-                        {expandedVideoId === msg.id ? (
-                          <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
-                        ) : (
-                          <VolumeX className="w-3.5 h-3.5 text-white/70" />
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* GOLOS (OVOZ) KO'RINISHI - "Ovozli xabar" YOZUVI BUTUNLAY YO'Q, FAQAT PLEYER */}
+                {/* GOLOS (OVOZ) KO'RINISHI - DURATION DASTURIY VA ANIQ KO'RSATILADI */}
                 {msg.media_type === 'voice' && msg.media_url && (
                   <div className="flex items-center space-x-3 py-1 pr-1 select-none">
                     <button
@@ -1175,7 +1344,7 @@ export default function ChatApp() {
                         <span className="w-1 h-4 bg-[#6ab2f2] rounded-full"></span>
                       </div>
                       <span className="text-[11px] text-white/70 mt-1 font-mono">
-                        {playingAudio === msg.id ? '▶ eshitilmoqda' : '0:05'}
+                        {playingAudio === msg.id ? '▶ eshitilmoqda' : formatDuration(msg.duration)}
                       </span>
                     </div>
                   </div>
@@ -1579,9 +1748,33 @@ export default function ChatApp() {
             </div>
           </div>
 
-          <p className="mt-5 text-xs text-white/80 font-medium tracking-wide flex items-center space-x-1.5 bg-black/40 px-4 py-1.5 rounded-full border border-white/10">
-            <span>Qo&apos;yib yuborsangiz avtomatik yuboriladi</span>
-          </p>
+          {/* QULF HOLATI VA ISHORASI (SWIPE UP TO LOCK / QULFLANGAN) */}
+          {!isRecordLocked ? (
+            <div 
+              onClick={(e) => {
+                e.stopPropagation();
+                isRecordLockedRef.current = true;
+                setIsRecordLocked(true);
+                isHoldingRecordRef.current = false;
+                if (window.navigator?.vibrate) window.navigator.vibrate(40);
+              }}
+              className="mt-4 flex items-center space-x-2 bg-black/60 backdrop-blur-md px-4 py-2 rounded-full border border-white/20 text-white/90 text-xs font-medium animate-bounce shadow-xl cursor-pointer active:scale-95 transition-all"
+            >
+              <Lock className="w-3.5 h-3.5 text-amber-400" />
+              <span>Tepaga suring — qulflash (qo&apos;lsiz yozish)</span>
+            </div>
+          ) : (
+            <div className="mt-4 flex items-center space-x-2 bg-emerald-500/25 backdrop-blur-md px-4 py-2 rounded-full border border-emerald-500/40 text-emerald-300 text-xs font-semibold shadow-xl">
+              <Lock className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Qulflangan — bemalol gapiring</span>
+            </div>
+          )}
+
+          {!isRecordLocked && (
+            <p className="mt-2 text-[11px] text-white/60 font-medium tracking-wide">
+              Qo&apos;yib yuborsangiz avtomatik yuboriladi
+            </p>
+          )}
 
           {/* PASTKI AMALLAR PANELI — QO'LGA ENG QULAY PASTKI QISMDA */}
           <div className="absolute bottom-6 sm:bottom-8 left-0 right-0 px-6 flex items-center justify-between z-50 safe-bottom">

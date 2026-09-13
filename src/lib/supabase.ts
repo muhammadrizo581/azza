@@ -19,6 +19,7 @@ export interface Message {
   media_url?: string;
   media_urls?: string[];
   media_type?: 'image' | 'voice' | 'video_note' | 'sticker' | 'file';
+  duration?: number;
   reply_to?: {
     id: string;
     text: string;
