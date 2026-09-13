@@ -26,6 +26,7 @@ export interface Message {
     sender_id: 'me' | 'partner';
     media_type?: 'image' | 'voice' | 'video_note' | 'sticker' | 'file' | string;
   } | null;
+  reactions?: Record<string, ('me' | 'partner')[]> | null;
   is_edited?: boolean;
   is_read: boolean;
   created_at: string;

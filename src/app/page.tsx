@@ -102,6 +102,7 @@ function TelegramVideoNote({
   onReplyClick,
   isHighlighted,
   onDoubleClick,
+  onToggleReaction,
 }: {
   msg: Message;
   isMe: boolean;
@@ -115,6 +116,7 @@ function TelegramVideoNote({
   onReplyClick?: (replyId: string) => void;
   isHighlighted?: boolean;
   onDoubleClick?: () => void;
+  onToggleReaction?: (msgId: string, emoji: string) => void;
 }) {
   const [isPlayingWithSound, setIsPlayingWithSound] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -304,6 +306,35 @@ function TelegramVideoNote({
           {isMe && <CheckCheck className="w-3 h-3 text-[#6ab2f2]" />}
         </div>
       </div>
+
+      {/* REAKSIYALAR (REACTIONS) */}
+      {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+        <div className={`flex flex-wrap items-center gap-1 mt-1 z-10 select-none ${isMe ? 'justify-end' : 'justify-start'}`}>
+          {Object.entries(msg.reactions).map(([emoji, users]) => {
+            const hasReacted = Boolean(currentUser && users.includes(currentUser as any));
+            return (
+              <button
+                key={emoji}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleReaction?.(msg.id, emoji);
+                }}
+                className={`flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs transition-all active:scale-90 cursor-pointer shadow-md ${
+                  hasReacted
+                    ? 'bg-[#2b5278] border border-[#6ab2f2] text-white'
+                    : 'bg-[#182533]/90 border border-[#2b394a] text-white/80'
+                }`}
+              >
+                <span className="text-sm leading-none">{emoji}</span>
+                {users.length > 1 && (
+                  <span className="text-[11px] font-medium text-white/90">{users.length}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -484,6 +515,7 @@ export default function ChatApp() {
     let duration = raw.duration || undefined;
     let is_edited = raw.is_edited || false;
     let reply_to = raw.reply_to || undefined;
+    let reactions = raw.reactions || undefined;
 
     // Agar text ichida maxsus json format saqlangan bo'lsa
     if (typeof text === 'string' && text.startsWith('__PAYLOAD_JSON__:')) {
@@ -496,6 +528,7 @@ export default function ChatApp() {
         duration = parsed.duration !== undefined ? parsed.duration : duration;
         is_edited = parsed.is_edited !== undefined ? parsed.is_edited : is_edited;
         reply_to = parsed.reply_to !== undefined ? parsed.reply_to : reply_to;
+        reactions = parsed.reactions !== undefined ? parsed.reactions : reactions;
       } catch {}
     }
 
@@ -508,6 +541,7 @@ export default function ChatApp() {
       media_type,
       duration,
       reply_to,
+      reactions,
       is_edited,
       is_read: raw.is_read || false,
       created_at: raw.created_at
@@ -864,6 +898,75 @@ export default function ChatApp() {
         event: 'typing',
         payload: { user: currentUser, isTyping: false }
       }).catch(() => {});
+    }
+  };
+
+  // XABARGA REAKSIYA QOLDIRISH (TELEGRAM REACTION)
+  const handleToggleReaction = async (msgId: string, emoji: string) => {
+    if (currentUser === 'guest') return;
+
+    const msg = messages.find((m) => m.id === msgId);
+    if (!msg) return;
+
+    if (window.navigator?.vibrate) window.navigator.vibrate(25);
+    if (emoji === '❤️') {
+      try {
+        confetti({ particleCount: 30, spread: 60, origin: { y: 0.7 } });
+      } catch {}
+    }
+
+    const currentReactions: Record<string, ('me' | 'partner')[]> = { ...(msg.reactions || {}) };
+    const user = currentUser as 'me' | 'partner';
+
+    const userCurrentEmoji = Object.keys(currentReactions).find((k) =>
+      currentReactions[k]?.includes(user)
+    );
+
+    if (userCurrentEmoji === emoji) {
+      // Reaksiyani olib tashlash (toggle off)
+      const filtered = currentReactions[emoji].filter((u) => u !== user);
+      if (filtered.length > 0) {
+        currentReactions[emoji] = filtered;
+      } else {
+        delete currentReactions[emoji];
+      }
+    } else {
+      // Eski reaksiyadan foydalanuvchini chiqarish
+      if (userCurrentEmoji) {
+        const filtered = currentReactions[userCurrentEmoji].filter((u) => u !== user);
+        if (filtered.length > 0) {
+          currentReactions[userCurrentEmoji] = filtered;
+        } else {
+          delete currentReactions[userCurrentEmoji];
+        }
+      }
+      // Yangi reaksiyaga qo'shish
+      currentReactions[emoji] = [...(currentReactions[emoji] || []), user];
+    }
+
+    const updatedReactions = Object.keys(currentReactions).length > 0 ? currentReactions : null;
+    const updatedMsg: Message = {
+      ...msg,
+      reactions: updatedReactions
+    };
+
+    updateMessagesState((prev) => prev.map((m) => (m.id === msgId ? updatedMsg : m)));
+    setSelectedMessage(null);
+
+    if (supabase) {
+      const payloadObj: any = {
+        text: msg.text,
+        reactions: updatedReactions
+      };
+      if (msg.media_url) payloadObj.media_url = msg.media_url;
+      if (msg.media_urls) payloadObj.media_urls = msg.media_urls;
+      if (msg.media_type) payloadObj.media_type = msg.media_type;
+      if (msg.duration !== undefined) payloadObj.duration = msg.duration;
+      if (msg.reply_to) payloadObj.reply_to = msg.reply_to;
+      if (msg.is_edited) payloadObj.is_edited = msg.is_edited;
+
+      const payloadText = `__PAYLOAD_JSON__:${JSON.stringify(payloadObj)}`;
+      await supabase.from('messages').update({ text: payloadText }).eq('id', msgId);
     }
   };
 
@@ -1927,7 +2030,8 @@ export default function ChatApp() {
                 currentUser={currentUser}
                 onReplyClick={scrollToMessage}
                 isHighlighted={highlightedMsgId === msg.id}
-                onDoubleClick={() => handleStartReply(msg)}
+                onDoubleClick={() => handleToggleReaction(msg.id, '❤️')}
+                onToggleReaction={handleToggleReaction}
                 onTouchStart={() => handleTouchStart(msg)}
                 onTouchEnd={handleTouchEnd}
                 onContextMenu={(e) => {
@@ -1969,7 +2073,7 @@ export default function ChatApp() {
                 onTouchEnd={() => handleBubbleTouchEnd(msg)}
                 onMouseDown={() => handleTouchStart(msg)}
                 onMouseUp={handleTouchEnd}
-                onDoubleClick={() => handleStartReply(msg)}
+                onDoubleClick={() => handleToggleReaction(msg.id, '❤️')}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   setSelectedMessage(msg);
@@ -2089,6 +2193,35 @@ export default function ChatApp() {
                   {isMe && <CheckCheck className="w-3 h-3 text-[#6ab2f2]" />}
                 </div>
               </div>
+
+              {/* REAKSIYALAR (REACTIONS) */}
+              {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                <div className={`flex flex-wrap items-center gap-1 mt-1 z-10 select-none ${isMe ? 'justify-end mr-1' : 'justify-start ml-1'}`}>
+                  {Object.entries(msg.reactions).map(([emoji, users]) => {
+                    const hasReacted = Boolean(currentUser && users.includes(currentUser as any));
+                    return (
+                      <button
+                        key={emoji}
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggleReaction(msg.id, emoji);
+                        }}
+                        className={`flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs transition-all active:scale-90 cursor-pointer shadow-md ${
+                          hasReacted
+                            ? 'bg-[#2b5278] border border-[#6ab2f2] text-white'
+                            : 'bg-[#182533]/90 border border-[#2b394a] text-white/80'
+                        }`}
+                      >
+                        <span className="text-sm leading-none">{emoji}</span>
+                        {users.length > 1 && (
+                          <span className="text-[11px] font-medium text-white/90">{users.length}</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           );
         })}
@@ -2309,6 +2442,27 @@ export default function ChatApp() {
               <p className="text-sm text-white/90 line-clamp-2">
                 {selectedMessage.text || (selectedMessage.media_type === 'image' ? '📷 Rasm' : selectedMessage.media_type === 'voice' ? '🎤 Ovozli xabar' : selectedMessage.media_type === 'video_note' ? '📹 Dumaloq video' : 'Xabar')}
               </p>
+            </div>
+
+            {/* REAKSIYALAR PANELI (TELEGRAM USLUBIDA) */}
+            <div className="bg-[#17212b]/95 backdrop-blur-md border border-[#2b394a] rounded-2xl p-2 px-3 shadow-xl flex items-center justify-between overflow-x-auto no-scrollbar gap-1.5">
+              {['❤️', '🔥', '👍', '👎', '😂', '🥰', '😍', '😭', '👏', '🎉'].map((emoji) => {
+                const isSelectedByMe = Boolean(
+                  currentUser && selectedMessage.reactions?.[emoji]?.includes(currentUser as any)
+                );
+                return (
+                  <button
+                    key={emoji}
+                    type="button"
+                    onClick={() => handleToggleReaction(selectedMessage.id, emoji)}
+                    className={`text-2xl p-2 rounded-xl active:scale-125 transition-all cursor-pointer ${
+                      isSelectedByMe ? 'bg-[#2b5278] ring-2 ring-[#6ab2f2] scale-110' : 'hover:bg-white/10 active:bg-white/15'
+                    }`}
+                  >
+                    {emoji}
+                  </button>
+                );
+              })}
             </div>
 
             {/* Asosiy amallar bloki */}
