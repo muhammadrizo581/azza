@@ -776,21 +776,21 @@ export default function ChatApp() {
     }
   };
 
-  // KAMERA STREAMINI OLISH (XAVFSIZ VA MOSLASHUVCHAN)
+  // KAMERA STREAMINI OLISH (TEZKOR VA MOSLASHUVCHAN)
   const getCameraStream = async (facing: 'user' | 'environment') => {
     try {
       return await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: facing ? { ideal: facing } : 'user',
-          width: { ideal: 640 },
-          height: { ideal: 640 }
+          facingMode: facing,
+          width: { ideal: 480, max: 720 },
+          height: { ideal: 480, max: 720 }
         },
         audio: true
       });
     } catch (err) {
       console.warn('Initial camera constraints failed, fallback to basic:', err);
       return await navigator.mediaDevices.getUserMedia({
-        video: true,
+        video: { facingMode: facing },
         audio: true
       });
     }
@@ -980,19 +980,34 @@ export default function ChatApp() {
     setCameraFacingMode(nextFacing);
 
     try {
-      const newStream = await getCameraStream(nextFacing);
-      const newVideoTrack = newStream.getVideoTracks()[0];
+      // Audio allaqachon ochiq, shuning uchun faqat yangi video trek olinadi (bir zumda almashadi)
+      let newStream: MediaStream;
+      try {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: nextFacing,
+            width: { ideal: 480, max: 720 },
+            height: { ideal: 480, max: 720 }
+          },
+          audio: false
+        });
+      } catch {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: nextFacing },
+          audio: false
+        });
+      }
 
-      if (videoStreamRef.current && newVideoTrack) {
+      const newVideoTrack = newStream.getVideoTracks()[0];
+      if (!newVideoTrack) return;
+
+      if (videoStreamRef.current) {
         const oldVideoTrack = videoStreamRef.current.getVideoTracks()[0];
         if (oldVideoTrack) {
           videoStreamRef.current.removeTrack(oldVideoTrack);
           oldVideoTrack.stop();
         }
         videoStreamRef.current.addTrack(newVideoTrack);
-
-        // Yangi streamdagi qo'shimcha audio trackni to'xtatish (asosiy mikrofon buzilmasligi uchun)
-        newStream.getAudioTracks().forEach((track) => track.stop());
 
         if (liveVideoPreviewRef.current) {
           liveVideoPreviewRef.current.srcObject = null;
@@ -1124,7 +1139,7 @@ export default function ChatApp() {
       } else {
         handleStartVideoRecording(cameraFacingModeRef.current);
       }
-    }, 280);
+    }, 200);
   };
 
   const handleRecordButtonUp = (e?: React.SyntheticEvent) => {
@@ -1308,7 +1323,7 @@ export default function ChatApp() {
     <div className="flex flex-col h-[100dvh] w-full max-w-lg mx-auto bg-[#0e1621] text-white overflow-hidden shadow-2xl relative">
       
       {/* HEADER */}
-      <header className="safe-top shrink-0 bg-[#17212b] border-b border-[#202b36] px-3 py-2.5 flex items-center justify-between z-30 shadow">
+      <header className="safe-top shrink-0 bg-[#17212b] border-b border-[#202b36] px-3 pb-2.5 flex items-center justify-between z-30 shadow">
         <div 
           onClick={() => setShowProfileDrawer(true)}
           className="flex items-center space-x-2.5 cursor-pointer active:opacity-80"
@@ -1567,34 +1582,7 @@ export default function ChatApp() {
         </footer>
       ) : isRecording ? (
         /* OVOZ YOZISH REJIMI */
-        <footer className="safe-bottom shrink-0 bg-[#17212b] border-t border-[#202b36] p-3 flex items-center justify-between z-20 animate-in slide-in-from-bottom">
-          <div className="flex items-center space-x-2.5">
-            <span className="w-3 h-3 rounded-full bg-red-500 animate-ping"></span>
-            <span className="text-sm font-medium text-red-400">
-              Ovoz yozilmoqda... {recordingDuration}s
-            </span>
-          </div>
-
-          <div className="flex items-center space-x-3">
-            <button
-              type="button"
-              onClick={handleCancelRecording}
-              className="text-xs text-[#7f91a4] hover:text-white px-2 py-1"
-            >
-              Bekor qilish
-            </button>
-            <button
-              type="button"
-              onClick={handleStopRecording}
-              className="p-2.5 bg-[#6ab2f2] text-white rounded-full active:scale-95 shadow"
-            >
-              <Send className="w-4 h-4" />
-            </button>
-          </div>
-        </footer>
-      ) : isRecording ? (
-        /* OVOZ YOZISH REJIMI */
-        <footer className="safe-bottom shrink-0 bg-[#17212b] border-t border-[#202b36] p-3 flex items-center justify-between z-20 animate-in slide-in-from-bottom">
+        <footer className="safe-bottom shrink-0 bg-[#17212b] border-t border-[#202b36] px-3 pt-3 flex items-center justify-between z-20 animate-in slide-in-from-bottom">
           <div className="flex items-center space-x-2.5">
             <span className="w-3 h-3 rounded-full bg-red-500 animate-ping"></span>
             <span className="text-sm font-medium text-red-400">
@@ -1621,7 +1609,7 @@ export default function ChatApp() {
         </footer>
       ) : (
         /* STANDART INPUT PANEL */
-        <footer className="safe-bottom shrink-0 bg-[#17212b] border-t border-[#202b36] p-2.5">
+        <footer className="safe-bottom shrink-0 bg-[#17212b] border-t border-[#202b36] px-2.5 pt-2.5">
           <form 
             onSubmit={handleSendMessage}
             className="flex items-center space-x-1.5 sm:space-x-2"

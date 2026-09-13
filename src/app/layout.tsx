@@ -15,6 +15,8 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
+  userScalable: false,
+  viewportFit: "cover", // iPhone Dynamic Island, Notch va Home indicator uchun to'liq ekran rejimi
   interactiveWidget: "resizes-content", // iPhone/Android klaviatura ochilganda oynani to'g'ri siqish
   themeColor: "#17212b",
 };
