@@ -57,18 +57,82 @@ function TelegramVideoNote({
 }) {
   const [isPlayingWithSound, setIsPlayingWithSound] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
+  const [videoSource, setVideoSource] = useState<string>('');
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
+  // iOS Safari va boshqa mobil brauzerlar data: URL videolarni AVPlayer orqali o'qiy olmaydi (qora ekran bo'lib qoladi).
+  // Shuning uchun data: URL ni darhol toza Blob URL ga aylantiramiz!
+  useEffect(() => {
+    if (!msg.media_url) return;
+
+    if (msg.media_url.startsWith('data:')) {
+      try {
+        const parts = msg.media_url.split(',');
+        const header = parts[0];
+        const base64Data = parts[1];
+        if (!base64Data) {
+          setVideoSource(msg.media_url);
+          return;
+        }
+
+        const mimeMatch = header.match(/data:(.*?)(;base64)?$/);
+        let mime = mimeMatch ? mimeMatch[1] : 'video/mp4';
+        if (mime.includes(';')) {
+          mime = mime.split(';')[0];
+        }
+
+        const binary = atob(base64Data);
+        const len = binary.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: mime || 'video/mp4' });
+        const url = URL.createObjectURL(blob);
+        setVideoSource(url);
+
+        return () => {
+          URL.revokeObjectURL(url);
+        };
+      } catch (err) {
+        console.error('Blob URL creation error:', err);
+        setVideoSource(msg.media_url);
+      }
+    } else {
+      setVideoSource(msg.media_url);
+    }
+  }, [msg.media_url]);
+
+  // Video elementiga xususiyatlarni to'g'ridan-to'g'ri biriktirish va autoplay qilish
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video || !videoSource) return;
+
     video.muted = true;
     video.defaultMuted = true;
     video.playsInline = true;
     video.setAttribute('playsinline', '');
     video.setAttribute('webkit-playsinline', '');
-    video.play().catch(() => {});
-  }, [msg.media_url]);
+    video.setAttribute('muted', '');
+    video.src = videoSource;
+    video.load();
+
+    const playPromise = video.play();
+    if (playPromise !== undefined) {
+      playPromise
+        .then(() => {
+          setIsVideoPlaying(true);
+        })
+        .catch(() => {
+          // Agar avtomatik o'ynatish cheklangan bo'lsa, birinchi kadrni chiqarish uchun currentTime suriladi
+          try {
+            video.currentTime = 0.001;
+          } catch {}
+          setIsVideoPlaying(false);
+        });
+    }
+  }, [videoSource]);
 
   const handleToggleSound = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -82,7 +146,9 @@ function TelegramVideoNote({
     } else {
       video.muted = false;
       video.currentTime = 0;
-      video.play().catch(() => {});
+      video.play().then(() => {
+        setIsVideoPlaying(true);
+      }).catch(() => {});
       setIsPlayingWithSound(true);
       setIsExpanded(true);
     }
@@ -98,40 +164,57 @@ function TelegramVideoNote({
         onContextMenu={onContextMenu}
         onClick={handleToggleSound}
         className={`relative cursor-pointer transition-all duration-300 ${
-          isExpanded ? 'w-64 h-64 sm:w-72 sm:h-72' : 'w-44 h-44 sm:w-48 sm:h-48'
+          isExpanded ? 'w-60 h-60 sm:w-68 sm:h-68' : 'w-44 h-44 sm:w-48 sm:h-48'
         } ${isSelected ? 'ring-3 ring-[#6ab2f2] rounded-full' : ''}`}
       >
-        {/* YUMALOQ VIDEO — BORDERSIZ, TORTBURCHAKSIZ TOZA TELEGRAM YUMALOQ VIDEO */}
-        <div className="w-full h-full rounded-full overflow-hidden shadow-2xl bg-[#17212b] relative group">
+        {/* YUMALOQ VIDEO — BORDERSIZ TOZA OVERFLOW-HIDDEN ICHIDA */}
+        <div className="w-full h-full rounded-full overflow-hidden shadow-2xl bg-[#17212b] relative flex items-center justify-center">
           <video
             ref={videoRef}
-            src={msg.media_url}
             autoPlay
             loop
             playsInline
             muted
+            preload="auto"
             className="w-full h-full object-cover rounded-full"
             onLoadedMetadata={(e) => {
               const v = e.currentTarget;
               v.muted = !isPlayingWithSound;
-              v.play().catch(() => {});
+              if (v.paused) {
+                try { v.currentTime = 0.001; } catch {}
+              }
+              v.play().then(() => setIsVideoPlaying(true)).catch(() => {});
+            }}
+            onCanPlay={(e) => {
+              const v = e.currentTarget;
+              v.muted = !isPlayingWithSound;
+              v.play().then(() => setIsVideoPlaying(true)).catch(() => {});
             }}
           />
 
-          {/* OVOZ HOLATI (TOP RIGHT) */}
-          <div className="absolute top-2.5 right-2.5 bg-black/60 backdrop-blur-md p-1.5 rounded-full text-white/90 shadow pointer-events-none">
-            {isPlayingWithSound ? (
-              <Volume2 className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-            ) : (
-              <VolumeX className="w-3.5 h-3.5 text-white/70" />
-            )}
-          </div>
+          {/* O'ynatish belgisi (agar video avtomatik boshlanmagan bo'lsa) */}
+          {!isVideoPlaying && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/25 pointer-events-none">
+              <div className="w-12 h-12 rounded-full bg-black/60 flex items-center justify-center shadow-lg border border-white/10">
+                <Play className="w-5 h-5 text-white ml-0.5 fill-current" />
+              </div>
+            </div>
+          )}
+        </div>
 
-          {/* VAQT VA STATUS (BOTTOM RIGHT) — YUMALOQ ICHIDA SLEEK GLASS BADGE */}
-          <div className="absolute bottom-2.5 right-2.5 bg-black/60 backdrop-blur-md px-2 py-0.5 rounded-full flex items-center space-x-1 text-[10px] text-white/90 shadow pointer-events-none">
-            <span>{time}</span>
-            {isMe && <CheckCheck className="w-3 h-3 text-[#6ab2f2]" />}
-          </div>
+        {/* OVOZ HOLATI (TOP RIGHT) — OVERFLOWDAN TASHQARIDA, KESILIB KETMAYDI */}
+        <div className="absolute top-0 right-0 z-10 bg-black/65 backdrop-blur-md p-1.5 rounded-full text-white shadow-lg pointer-events-none border border-white/10">
+          {isPlayingWithSound ? (
+            <Volume2 className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+          ) : (
+            <VolumeX className="w-3.5 h-3.5 text-white/70" />
+          )}
+        </div>
+
+        {/* VAQT VA STATUS (BOTTOM RIGHT) — OVERFLOWDAN TASHQARIDA, KESILIB KETMAYDI */}
+        <div className="absolute bottom-0 right-0 z-10 bg-black/65 backdrop-blur-md px-2 py-0.5 rounded-full flex items-center space-x-1 text-[10px] text-white font-medium shadow-lg pointer-events-none border border-white/10">
+          <span>{time}</span>
+          {isMe && <CheckCheck className="w-3 h-3 text-[#6ab2f2]" />}
         </div>
       </div>
     </div>
@@ -201,6 +284,9 @@ export default function ChatApp() {
   const pressTriggerTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isHoldingRecordRef = useRef<boolean>(false);
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isTouchTriggeredRef = useRef<boolean>(false);
+  const lastTouchEndTimeRef = useRef<number>(0);
+  const lastModeToggleTimeRef = useRef<number>(0);
 
   // VIDEO STREAM ni DOM dagi <video> elementga darhol va ishonchli ulash
   const setLiveVideoPreviewRef = useCallback((el: HTMLVideoElement | null) => {
@@ -793,10 +879,11 @@ export default function ChatApp() {
         setIsRecordLocked(false);
 
         // Barcha treklar to'xtatiladi
-        stream.getTracks().forEach((track) => track.stop());
-        if (videoStreamRef.current === stream) {
+        if (videoStreamRef.current) {
+          videoStreamRef.current.getTracks().forEach((t) => t.stop());
           videoStreamRef.current = null;
         }
+        stream.getTracks().forEach((track) => track.stop());
         setVideoStream(null);
 
         if (isCancelled || videoChunksRef.current.length === 0) {
@@ -805,7 +892,8 @@ export default function ChatApp() {
         }
 
         const selectedType = mimeType || mediaRecorder.mimeType || 'video/mp4';
-        const videoBlob = new Blob(videoChunksRef.current, { type: selectedType });
+        const cleanMime = selectedType.split(';')[0] || 'video/mp4';
+        const videoBlob = new Blob(videoChunksRef.current, { type: cleanMime });
         videoChunksRef.current = [];
 
         if (videoBlob.size === 0) return;
@@ -1003,7 +1091,17 @@ export default function ChatApp() {
 
   // TELEGRAM USLUBIDAGI MIC/VIDEO TUGMASI: BOSIB TURISH (LONG PRESS) VA BITTA BOSISH
   const handleRecordButtonDown = (e: React.SyntheticEvent) => {
-    e.preventDefault();
+    const isTouch = 'touches' in e || (e as any).type?.startsWith('touch');
+
+    if (isTouch) {
+      isTouchTriggeredRef.current = true;
+    } else {
+      // Agar barmoq bilan tegilgan bo'lsa va brauzer orqasidan sun'iy mousedown yuborayotgan bo'lsa, e'tiborsiz qoldiramiz
+      if (isTouchTriggeredRef.current || Date.now() - lastTouchEndTimeRef.current < 600) {
+        return;
+      }
+    }
+
     isHoldingRecordRef.current = false;
     isRecordLockedRef.current = false;
     setIsRecordLocked(false);
@@ -1030,6 +1128,20 @@ export default function ChatApp() {
   };
 
   const handleRecordButtonUp = (e?: React.SyntheticEvent) => {
+    const isTouch = e && ('changedTouches' in e || (e as any).type?.startsWith('touch'));
+
+    if (isTouch) {
+      lastTouchEndTimeRef.current = Date.now();
+      setTimeout(() => {
+        isTouchTriggeredRef.current = false;
+      }, 600);
+    } else if (e) {
+      // Agar sun'iy mouseup bo'lsa (touchdan keyingi), e'tiborsiz qoldiramiz
+      if (isTouchTriggeredRef.current || Date.now() - lastTouchEndTimeRef.current < 600) {
+        return;
+      }
+    }
+
     if (pressTriggerTimerRef.current) {
       clearTimeout(pressTriggerTimerRef.current);
       pressTriggerTimerRef.current = null;
@@ -1049,8 +1161,13 @@ export default function ChatApp() {
       }
     } else {
       // Shunchaki bitta bosib qo'yib yubordi (click) — rejim almashadi (Mic <-> Video)!
-      setInputMode((prev) => (prev === 'voice' ? 'video' : 'voice'));
-      if (window.navigator?.vibrate) window.navigator.vibrate(20);
+      // Millisekundda qaytib qolmasligi uchun 350ms throttle qo'yildi
+      const now = Date.now();
+      if (now - lastModeToggleTimeRef.current > 350) {
+        lastModeToggleTimeRef.current = now;
+        setInputMode((prev) => (prev === 'voice' ? 'video' : 'voice'));
+        if (window.navigator?.vibrate) window.navigator.vibrate(20);
+      }
     }
   };
 
