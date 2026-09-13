@@ -22,7 +22,6 @@ import {
   Play,
   Pause,
   Check,
-  SwitchCamera,
   Volume2,
   VolumeX
 } from 'lucide-react';
@@ -244,19 +243,22 @@ export default function ChatApp() {
 
   // VOICE RECORDING
   const [isRecording, setIsRecording] = useState(false);
+  const isRecordingRef = useRef<boolean>(false);
+  const isStartingRecordingRef = useRef<boolean>(false);
+  const shouldStopRecordingOnReadyRef = useRef<boolean>(false);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const audioCancelledRef = useRef<boolean>(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const recordingDurationRef = useRef<number>(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // TELEGRAM YUMALOQ VIDEO RECORDING, CAMERA FLIP VA QULF (LOCK)
+  // TELEGRAM YUMALOQ VIDEO RECORDING VA QULF (LOCK) — FAQAT OLD KAMERA (USER)
   const [isVideoRecording, setIsVideoRecording] = useState(false);
   const [videoRecordingDuration, setVideoRecordingDuration] = useState(0);
   const videoRecordingDurationRef = useRef<number>(0);
   const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
-  const [cameraFacingMode, setCameraFacingMode] = useState<'user' | 'environment'>('user');
-  const cameraFacingModeRef = useRef<'user' | 'environment'>('user');
   const [isRecordLocked, setIsRecordLocked] = useState(false);
   const isRecordLockedRef = useRef<boolean>(false);
   const recordTouchStartYRef = useRef<number>(0);
@@ -276,6 +278,7 @@ export default function ChatApp() {
   // AUDIO PLAYING
   const [playingAudio, setPlayingAudio] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const activeBlobUrlRef = useRef<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -659,16 +662,41 @@ export default function ChatApp() {
     e.target.value = '';
   };
 
-  // OVOZ YOZISH (VOICE / GOLOS) - "Ovozli xabar" yozuvi butunlay olib tashlangan
+  // OVOZ YOZISH (VOICE / GOLOS)
   const handleStartRecording = async () => {
     if (!navigator?.mediaDevices?.getUserMedia) {
       alert('Brauzeringiz mikrofonga ruxsat bermayapti (HTTPS yoki sozlamalarni tekshiring)');
       return;
     }
 
+    isStartingRecordingRef.current = true;
+    shouldStopRecordingOnReadyRef.current = false;
+    audioCancelledRef.current = false;
+    setIsRecording(true);
+    isRecordingRef.current = true;
+    recordingDurationRef.current = 0;
+    setRecordingDuration(0);
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      audioStreamRef.current = stream;
+
+      // Agar mikrofon ochilguncha bekor qilingan bo'lsa
+      if (audioCancelledRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        audioStreamRef.current = null;
+        isStartingRecordingRef.current = false;
+        isRecordingRef.current = false;
+        setIsRecording(false);
+        return;
+      }
+
       let mimeType = '';
       if (typeof MediaRecorder.isTypeSupported === 'function') {
         if (MediaRecorder.isTypeSupported('audio/mp4')) {
@@ -694,8 +722,29 @@ export default function ChatApp() {
       };
 
       mediaRecorder.onstop = async () => {
-        const selectedType = mimeType || mediaRecorder.mimeType || 'audio/mp4';
+        // MIKROFON TREKLARINI DARHOL VA TO'LIQ TO'XTATISH (ORANGE DOT O'CHISHI UCHUN)
+        if (audioStreamRef.current) {
+          audioStreamRef.current.getTracks().forEach((track) => track.stop());
+          audioStreamRef.current = null;
+        }
+        stream.getTracks().forEach((track) => track.stop());
+
+        const isCancelled = audioCancelledRef.current;
+        audioCancelledRef.current = false;
+        isRecordingRef.current = false;
+        setIsRecording(false);
+
+        if (isCancelled || audioChunksRef.current.length === 0) {
+          audioChunksRef.current = [];
+          return;
+        }
+
+        const selectedType = (mimeType || mediaRecorder.mimeType || 'audio/mp4').split(';')[0] || 'audio/mp4';
         const audioBlob = new Blob(audioChunksRef.current, { type: selectedType });
+        audioChunksRef.current = [];
+
+        if (audioBlob.size === 0) return;
+
         const finalVoiceDuration = Math.max(recordingDurationRef.current, 1);
         const reader = new FileReader();
         reader.onloadend = async () => {
@@ -704,7 +753,7 @@ export default function ChatApp() {
           const newMsg: Message = {
             id: `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
             sender_id: currentUser as 'me' | 'partner',
-            text: '', // Matn yo'q, Telegramdek faqat audio pleyer
+            text: '',
             media_url: base64Audio,
             media_type: 'voice',
             duration: finalVoiceDuration,
@@ -734,45 +783,94 @@ export default function ChatApp() {
           }
         };
         reader.readAsDataURL(audioBlob);
-        stream.getTracks().forEach((track) => track.stop());
       };
 
       mediaRecorder.start(250);
-      setIsRecording(true);
+      isStartingRecordingRef.current = false;
+
+      // Agar mikrofon ochilguncha foydalanuvchi barmoqni qo'yib yuborgan bo'lsa
+      if (shouldStopRecordingOnReadyRef.current) {
+        shouldStopRecordingOnReadyRef.current = false;
+        setTimeout(() => {
+          handleStopRecording();
+        }, 300);
+      }
+
       recordingDurationRef.current = 0;
       setRecordingDuration(0);
 
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+      }
       recordingTimerRef.current = setInterval(() => {
         recordingDurationRef.current += 1;
         setRecordingDuration(recordingDurationRef.current);
       }, 1000);
     } catch (err: unknown) {
       console.error("Mic error:", err);
+      isStartingRecordingRef.current = false;
+      isRecordingRef.current = false;
+      setIsRecording(false);
+      if (audioStreamRef.current) {
+        audioStreamRef.current.getTracks().forEach((track) => track.stop());
+        audioStreamRef.current = null;
+      }
       const errorMsg = err instanceof Error ? err.message : String(err);
       alert(`Mikrofon xatosi: ${errorMsg}. Safari yoki brauzer sozlamalarida mikrofonga ruxsat bering.`);
     }
   };
 
   const handleStopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-        recordingTimerRef.current = null;
+    isRecordingRef.current = false;
+    setIsRecording(false);
+
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+
+    if (isStartingRecordingRef.current) {
+      shouldStopRecordingOnReadyRef.current = true;
+      return;
+    }
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch (err) {
+        console.warn('Stop mic recorder warning:', err);
       }
+    }
+
+    // Mikrofon treklarini to'xtatish kafolati
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach((track) => track.stop());
+      audioStreamRef.current = null;
     }
   };
 
   const handleCancelRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      audioChunksRef.current = [];
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-        recordingTimerRef.current = null;
-      }
+    audioCancelledRef.current = true;
+    shouldStopRecordingOnReadyRef.current = false;
+    isStartingRecordingRef.current = false;
+    isRecordingRef.current = false;
+    setIsRecording(false);
+    audioChunksRef.current = [];
+
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {}
+    }
+
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach((track) => track.stop());
+      audioStreamRef.current = null;
     }
   };
 
@@ -796,8 +894,8 @@ export default function ChatApp() {
     }
   };
 
-  // TELEGRAM YUMALOQ VIDEO (VIDEO NOTE) YOZISH
-  const handleStartVideoRecording = async (facing: 'user' | 'environment' = cameraFacingMode) => {
+  // TELEGRAM YUMALOQ VIDEO (VIDEO NOTE) YOZISH — OLD KAMERA
+  const handleStartVideoRecording = async () => {
     if (!navigator?.mediaDevices?.getUserMedia) {
       alert('Brauzeringiz kameraga ruxsat bermayapti');
       return;
@@ -810,7 +908,7 @@ export default function ChatApp() {
     setVideoRecordingDuration(0);
 
     try {
-      const stream = await getCameraStream(facing);
+      const stream = await getCameraStream('user');
       videoStreamRef.current = stream;
       setVideoStream(stream);
 
@@ -970,72 +1068,6 @@ export default function ChatApp() {
     }
   };
 
-  // KAMERANI O'GIRISH (OLD <-> ORQA KAMERA)
-  const handleFlipCamera = async (e?: React.SyntheticEvent) => {
-    if (e) {
-      e.stopPropagation();
-    }
-    const nextFacing = cameraFacingModeRef.current === 'user' ? 'environment' : 'user';
-    cameraFacingModeRef.current = nextFacing;
-    setCameraFacingMode(nextFacing);
-
-    try {
-      // Audio allaqachon ochiq, shuning uchun faqat yangi video trek olinadi (bir zumda almashadi)
-      let newStream: MediaStream;
-      try {
-        newStream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: nextFacing,
-            width: { ideal: 480, max: 720 },
-            height: { ideal: 480, max: 720 }
-          },
-          audio: false
-        });
-      } catch {
-        newStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: nextFacing },
-          audio: false
-        });
-      }
-
-      const newVideoTrack = newStream.getVideoTracks()[0];
-      if (!newVideoTrack) return;
-
-      if (videoStreamRef.current) {
-        const oldVideoTrack = videoStreamRef.current.getVideoTracks()[0];
-        if (oldVideoTrack) {
-          videoStreamRef.current.removeTrack(oldVideoTrack);
-          oldVideoTrack.stop();
-        }
-        videoStreamRef.current.addTrack(newVideoTrack);
-
-        if (liveVideoPreviewRef.current) {
-          liveVideoPreviewRef.current.srcObject = null;
-          liveVideoPreviewRef.current.srcObject = videoStreamRef.current;
-          liveVideoPreviewRef.current.muted = true;
-          liveVideoPreviewRef.current.defaultMuted = true;
-          liveVideoPreviewRef.current.playsInline = true;
-          liveVideoPreviewRef.current.play().catch(() => {});
-        }
-        setVideoStream(videoStreamRef.current);
-      } else {
-        videoStreamRef.current = newStream;
-        setVideoStream(newStream);
-        if (liveVideoPreviewRef.current) {
-          liveVideoPreviewRef.current.srcObject = null;
-          liveVideoPreviewRef.current.srcObject = newStream;
-          liveVideoPreviewRef.current.muted = true;
-          liveVideoPreviewRef.current.defaultMuted = true;
-          liveVideoPreviewRef.current.playsInline = true;
-          liveVideoPreviewRef.current.play().catch(() => {});
-        }
-      }
-      if (window.navigator?.vibrate) window.navigator.vibrate(30);
-    } catch (err) {
-      console.error('Flip camera error:', err);
-    }
-  };
-
   const handleStopVideoRecording = (e?: React.SyntheticEvent) => {
     if (e) {
       e.stopPropagation();
@@ -1137,7 +1169,7 @@ export default function ChatApp() {
       if (inputMode === 'voice') {
         handleStartRecording();
       } else {
-        handleStartVideoRecording(cameraFacingModeRef.current);
+        handleStartVideoRecording();
       }
     }, 200);
   };
@@ -1167,18 +1199,17 @@ export default function ChatApp() {
       return;
     }
 
-    if (isHoldingRecordRef.current || isStartingVideoRef.current || isVideoRecordingRef.current) {
+    if (isHoldingRecordRef.current || isStartingRecordingRef.current || isRecordingRef.current || isStartingVideoRef.current || isVideoRecordingRef.current) {
       isHoldingRecordRef.current = false;
-      if (isRecording) {
+      if (inputMode === 'voice') {
         handleStopRecording();
       } else {
         handleStopVideoRecording();
       }
     } else {
       // Shunchaki bitta bosib qo'yib yubordi (click) — rejim almashadi (Mic <-> Video)!
-      // Millisekundda qaytib qolmasligi uchun 350ms throttle qo'yildi
       const now = Date.now();
-      if (now - lastModeToggleTimeRef.current > 350) {
+      if (now - lastModeToggleTimeRef.current > 300) {
         lastModeToggleTimeRef.current = now;
         setInputMode((prev) => (prev === 'voice' ? 'video' : 'voice'));
         if (window.navigator?.vibrate) window.navigator.vibrate(20);
@@ -1188,7 +1219,7 @@ export default function ChatApp() {
 
   // BARMOQNI TEPAGA SURGANDA (SWIPE UP) — AVTOMATIK QULFLASH (LOCK)
   const handleTouchMoveRecord = (e: TouchEvent | MouseEvent) => {
-    if (!isHoldingRecordRef.current && !isVideoRecordingRef.current) return;
+    if (!isHoldingRecordRef.current && !isRecordingRef.current && !isVideoRecordingRef.current) return;
     if (isRecordLockedRef.current) return;
 
     const clientY = 'touches' in e && (e as TouchEvent).touches?.[0]
@@ -1208,7 +1239,7 @@ export default function ChatApp() {
   useEffect(() => {
     const handleGlobalWindowRelease = () => {
       if (isRecordLockedRef.current) return;
-      if (isHoldingRecordRef.current || isStartingVideoRef.current || isVideoRecordingRef.current) {
+      if (isHoldingRecordRef.current || isStartingRecordingRef.current || isRecordingRef.current || isStartingVideoRef.current || isVideoRecordingRef.current) {
         handleRecordButtonUp();
       }
     };
@@ -1224,25 +1255,84 @@ export default function ChatApp() {
       window.removeEventListener('touchmove', handleTouchMoveRecord);
       window.removeEventListener('mousemove', handleTouchMoveRecord);
     };
-  }, [isRecording]);
+  }, []);
 
+  // TELEGRAM OVOZLI XABARLARINI O'YNATISH (IOS SAFARI VA BARCHA BRAUZERLARDA KAFOLATLANGAN)
   const handleTogglePlayAudio = (msgId: string, url?: string) => {
     if (!url) return;
 
     if (playingAudio === msgId) {
-      audioRef.current?.pause();
-      setPlayingAudio(null);
-    } else {
       if (audioRef.current) {
         audioRef.current.pause();
+        audioRef.current.currentTime = 0;
       }
-      const audio = new Audio(url);
+      setPlayingAudio(null);
+      return;
+    }
+
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current = null;
+    }
+    if (activeBlobUrlRef.current) {
+      try { URL.revokeObjectURL(activeBlobUrlRef.current); } catch {}
+      activeBlobUrlRef.current = null;
+    }
+
+    // iOS Safari va boshqa brauzerlar data: URL audiolarni o'qiy olmasligi mumkin.
+    // Shuning uchun data: URL ni darhol toza Blob URL ga aylantiramiz!
+    let playUrl = url;
+    if (url.startsWith('data:')) {
+      try {
+        const parts = url.split(',');
+        const header = parts[0];
+        const base64Data = parts[1];
+        if (base64Data) {
+          const mimeMatch = header.match(/data:(.*?)(;base64)?$/);
+          let mime = mimeMatch ? mimeMatch[1] : 'audio/mp4';
+          if (mime.includes(';')) {
+            mime = mime.split(';')[0];
+          }
+          const binary = atob(base64Data);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: mime || 'audio/mp4' });
+          playUrl = URL.createObjectURL(blob);
+          activeBlobUrlRef.current = playUrl;
+        }
+      } catch (err) {
+        console.warn('Audio blob conversion error:', err);
+      }
+    }
+
+    try {
+      const audio = new Audio(playUrl);
       audioRef.current = audio;
-      audio.play();
-      setPlayingAudio(msgId);
+      audio.volume = 1.0;
+
       audio.onended = () => {
         setPlayingAudio(null);
       };
+
+      audio.onerror = (e) => {
+        console.error('Audio playback error:', e);
+        setPlayingAudio(null);
+      };
+
+      audio.play()
+        .then(() => {
+          setPlayingAudio(msgId);
+        })
+        .catch((err) => {
+          console.error('Audio play error:', err);
+          setPlayingAudio(null);
+        });
+    } catch (err) {
+      console.error('Audio init error:', err);
+      setPlayingAudio(null);
     }
   };
 
@@ -1843,7 +1933,7 @@ export default function ChatApp() {
                 v.muted = true;
                 v.play().catch(() => {});
               }}
-              className={`w-full h-full object-cover ${cameraFacingMode === 'user' ? '-scale-x-100' : ''}`} 
+              className="w-full h-full object-cover -scale-x-100" 
             />
 
             {/* VAQT SANAGICH */}
@@ -1889,49 +1979,34 @@ export default function ChatApp() {
             onTouchEnd={(e) => e.stopPropagation()}
             onMouseDown={(e) => e.stopPropagation()}
             onMouseUp={(e) => e.stopPropagation()}
-            className="absolute bottom-6 sm:bottom-8 left-0 right-0 px-6 flex items-center justify-between z-50 safe-bottom pointer-events-auto"
+            className="absolute bottom-6 sm:bottom-8 left-0 right-0 px-8 flex items-center justify-between z-50 safe-bottom pointer-events-auto max-w-sm mx-auto w-full"
           >
-            {/* BEKOR QILISH TUGMASI (CHAP TOMONDA, QIZIL VA QULAY) */}
+            {/* BEKOR QILISH TUGMASI (CHAPDA) */}
             <button
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 handleCancelVideoRecording(e);
               }}
-              className="flex items-center space-x-2 px-4 py-3 rounded-full bg-red-500/25 active:bg-red-500/45 text-red-300 border border-red-500/40 backdrop-blur-md shadow-xl active:scale-95 transition-all cursor-pointer select-none"
+              className="flex items-center space-x-2 px-5 py-3 rounded-full bg-red-500/25 active:bg-red-500/45 text-red-300 border border-red-500/40 backdrop-blur-md shadow-xl active:scale-95 transition-all cursor-pointer select-none"
               title="Bekor qilish"
             >
               <Trash2 className="w-5 h-5 shrink-0" />
               <span className="text-xs font-semibold tracking-wide">Bekor qilish</span>
             </button>
 
-            {/* YUBORISH TUGMASI (O'RTADA, TAP QILIB YUBORISH UCHUN) */}
+            {/* YUBORISH TUGMASI (O'NGDA) */}
             <button
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 handleStopVideoRecording(e);
               }}
-              className="w-14 h-14 rounded-full bg-emerald-500 active:bg-emerald-600 text-white shadow-[0_0_25px_rgba(16,185,129,0.5)] flex items-center justify-center active:scale-95 transition-all cursor-pointer select-none"
+              className="flex items-center space-x-2 px-6 py-3 rounded-full bg-emerald-500 active:bg-emerald-600 text-white shadow-[0_0_25px_rgba(16,185,129,0.5)] active:scale-95 transition-all cursor-pointer select-none font-semibold text-xs tracking-wide"
               title="Yuborish"
             >
-              <Send className="w-6 h-6 ml-0.5" />
-            </button>
-
-            {/* KAMERANI ALMASHTIRISH (O'NG TOMONDA, OLD / ORQA) */}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleFlipCamera(e);
-              }}
-              className="flex items-center space-x-2 px-4 py-3 rounded-full bg-white/15 active:bg-white/30 text-white border border-white/20 backdrop-blur-md shadow-xl active:scale-95 transition-all cursor-pointer select-none"
-              title="Kamerani almashtirish"
-            >
-              <SwitchCamera className="w-5 h-5 text-emerald-300 shrink-0" />
-              <span className="text-xs font-semibold tracking-wide">
-                {cameraFacingMode === 'user' ? 'Orqa' : 'Old'}
-              </span>
+              <Send className="w-5 h-5 mr-1" />
+              <span>Yuborish</span>
             </button>
           </div>
         </div>
