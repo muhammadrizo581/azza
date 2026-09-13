@@ -159,14 +159,15 @@ export async function getCachedMessages(): Promise<Message[]> {
  * Xabarlarni IndexedDB xotirasiga to'liq va cheklovsiz saqlash
  */
 export async function saveMessagesCache(messages: Message[]): Promise<void> {
-  if (!Array.isArray(messages) || messages.length === 0) return;
+  if (!Array.isArray(messages)) return;
 
-  // 1. IndexedDB'ga to'liq saqlash (rasmlar, ovozlar, matnlar to'liq hajmda saqlanadi)
+  // 1. IndexedDB'ga to'liq saqlash (eski o'chirilgan xabarlarni tozalab, faqat mavjudlarini saqlaymiz)
   try {
     const db = await openChatDB();
     const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
 
+    store.clear();
     for (const msg of messages) {
       if (msg && msg.id) {
         store.put(msg);
@@ -176,24 +177,52 @@ export async function saveMessagesCache(messages: Message[]): Promise<void> {
     console.warn('IndexedDB saqlashda ogohlantirish:', err);
   }
 
-  // 2. localStorage uchun yengil zaxira nusxa (agar joy cheklangan bo'lsa)
+  // 2. localStorage uchun yangilash
+  if (typeof window !== 'undefined') {
+    if (messages.length === 0) {
+      try {
+        localStorage.removeItem('azza_chat_cache');
+      } catch {}
+    } else {
+      try {
+        const recentList = messages.slice(-30);
+        localStorage.setItem('azza_chat_cache', JSON.stringify(recentList));
+      } catch {
+        try {
+          const lightList = messages.slice(-25).map((m) => {
+            if (m.media_url && m.media_url.length > 500) {
+              const { media_url, media_urls, ...rest } = m;
+              return rest;
+            }
+            return m;
+          });
+          localStorage.setItem('azza_chat_cache', JSON.stringify(lightList));
+        } catch {}
+      }
+    }
+  }
+}
+
+/**
+ * Bitta xabarni keshdan butunlay o'chirish
+ */
+export async function deleteCachedMessage(id: string): Promise<void> {
+  try {
+    const db = await openChatDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    tx.objectStore(STORE_NAME).delete(id);
+  } catch {}
   if (typeof window !== 'undefined') {
     try {
-      const recentList = messages.slice(-30);
-      localStorage.setItem('azza_chat_cache', JSON.stringify(recentList));
-    } catch {
-      try {
-        // Joy yetmasa katta media fayllarsiz saqlash (hech qachon [cached] yozilmaydi!)
-        const lightList = messages.slice(-25).map((m) => {
-          if (m.media_url && m.media_url.length > 500) {
-            const { media_url, media_urls, ...rest } = m;
-            return rest;
-          }
-          return m;
-        });
-        localStorage.setItem('azza_chat_cache', JSON.stringify(lightList));
-      } catch {}
-    }
+      const raw = localStorage.getItem('azza_chat_cache');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter((m: any) => m.id !== id);
+          localStorage.setItem('azza_chat_cache', JSON.stringify(filtered));
+        }
+      }
+    } catch {}
   }
 }
 

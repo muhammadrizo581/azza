@@ -36,7 +36,8 @@ import {
   getCachedMessages, 
   saveMessagesCache, 
   mergeMessageLists, 
-  clearChatCache 
+  clearChatCache,
+  deleteCachedMessage
 } from '@/lib/chatStorage';
 
 // RASMLARNI SIFATLI VA TEZKOR QISQARTIRISH (KVOTA TO'LIB QOLMASLIGI UCHUN)
@@ -670,20 +671,39 @@ export default function ChatApp() {
     };
   };
 
-  // 2. Xabarlarni Supabase orqali yuklash (Dastlab faqat eng oxirgi 30 ta xabar)
+  // 2. Xabarlarni Supabase orqali yuklash va keshni DB bilan 100% sinxronlash
   const loadMessages = async () => {
     if (!supabase || currentUser === 'guest') return;
     const partnerKey = currentUser === 'me' ? 'partner' : 'me';
 
     try {
-      // DASTLAB FAQAT ENG OXIRGI 30 TA XABARNI TEZKOR (50ms) YUKLASH
+      // 1. Bazadagi barcha mavjud xabarlarning ID ro'yxatini olish
+      // Bu nihoyatda tez (faqat ID indeksdan o'qiladi, ~15ms).
+      // DB dan o'chirilgan xabarlarni keshdan ham to'liq tozalash uchun xizmat qiladi!
+      const { data: allIdsRows, error: idError } = await supabase
+        .from('messages')
+        .select('id');
+
+      // 2. Dastlab faqat eng oxirgi 30 ta xabarni to'liq yuklash
       const { data: recentRows, error: recentError } = await supabase
         .from('messages')
         .select('*')
         .order('created_at', { ascending: false })
         .limit(30);
 
-      if (!recentError && recentRows && recentRows.length > 0) {
+      if (idError && recentError) return;
+
+      const validDbIdSet = new Set<string>();
+      if (!idError && allIdsRows) {
+        for (const row of allIdsRows) {
+          if (row.id && !row.id.startsWith('status_')) {
+            validDbIdSet.add(row.id);
+          }
+        }
+      }
+
+      let chatRecent: Message[] = [];
+      if (!recentError && recentRows) {
         if (recentRows.length < 30) {
           hasMoreOlderRef.current = false;
           setHasMoreOlder(false);
@@ -692,7 +712,6 @@ export default function ChatApp() {
           setHasMoreOlder(true);
         }
 
-        // Chronological tartibga keltiramiz (tepada eski, pastda eng yangi)
         recentRows.reverse();
 
         // Sherikning oxirgi ko'ringan vaqtini olish
@@ -710,18 +729,32 @@ export default function ChatApp() {
           } catch {}
         }
 
-        const chatRecent = recentRows
+        chatRecent = recentRows
           .filter((r: any) => !r.id?.startsWith('status_') && !(typeof r.text === 'string' && r.text.startsWith('__STATUS__:')))
           .map(parseIncomingMsg);
-
-        // Darhol ekranga chiqaramiz
-        updateMessagesState((prev) => mergeMessageLists(prev, chatRecent));
-
-        // Dastlabki yuklashda pastga scroll qilamiz
-        setTimeout(() => {
-          messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
-        }, 60);
       }
+
+      // Keshni DB bilan to'liq sinxronlash:
+      // Bazadan o'chirilgan har qanday eski xabarlarni keshdan ham, ekrandan ham yo'qotamiz!
+      updateMessagesState((prev) => {
+        let baseList = prev;
+        if (!idError && allIdsRows) {
+          baseList = prev.filter((m) => {
+            if (validDbIdSet.has(m.id)) return true;
+            // Agar foydalanuvchi hozirgina yuborgan bo'lsa va hali DB ga insert arafasida bo'lsa saqlab turamiz
+            if (m.sender_id === currentUser && (Date.now() - new Date(m.created_at).getTime() < 8000)) {
+              return true;
+            }
+            return false; // DB da mavjud emas -> O'chirilgan!
+          });
+        }
+        return mergeMessageLists(baseList, chatRecent);
+      });
+
+      // Dastlabki yuklashda pastga scroll qilamiz
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+      }, 60);
     } catch (e) {
       console.error('Fetch error:', e);
     }
@@ -956,10 +989,12 @@ export default function ChatApp() {
             });
           });
         } else if (payload.eventType === 'DELETE') {
-          const deletedId = (payload.old as { id: string }).id;
-          updateMessagesState((prev) => {
-            return prev.filter((m) => m.id !== deletedId);
-          });
+          const deletedId = (payload.old as { id: string })?.id;
+          if (deletedId) {
+            updateMessagesState((prev) => {
+              return prev.filter((m) => m.id !== deletedId);
+            });
+          }
         }
       })
       .on('broadcast', { event: 'new_message' }, ({ payload }) => {
@@ -975,6 +1010,11 @@ export default function ChatApp() {
             if (prev.some((m) => m.id === parsed.id)) return prev;
             return [...prev, parsed];
           });
+        }
+      })
+      .on('broadcast', { event: 'message_deleted' }, ({ payload }) => {
+        if (payload?.id) {
+          updateMessagesState((prev) => prev.filter((m) => m.id !== payload.id));
         }
       })
       .on('presence', { event: 'sync' }, () => {
@@ -1102,13 +1142,20 @@ export default function ChatApp() {
     }
   }, [messages, currentUser, markPartnerMessagesAsRead]);
 
-  // Foydalanuvchi ekranga qaytganda yoki ekranga teginganda o'qilmagan xabarlarni o'qildi qilish
+  // Foydalanuvchi ekranga qaytganda yoki ekranga teginganda o'qilmagan xabarlarni o'qildi qilish va DB bilan sinxronlash
+  const lastSyncCheckRef = useRef<number>(0);
   useEffect(() => {
     if (currentUser === 'guest') return;
     const handleActive = () => {
       const partnerKey = currentUser === 'me' ? 'partner' : 'me';
       if (messages.some((m) => m.sender_id === partnerKey && !m.is_read)) {
         markPartnerMessagesAsRead();
+      }
+      // Foydalanuvchi ilovaga qaytganida DB dan o'chirilgan xabarlarni tekshirib tozalash
+      const now = Date.now();
+      if (now - lastSyncCheckRef.current > 8000) {
+        lastSyncCheckRef.current = now;
+        loadMessages();
       }
     };
     window.addEventListener('focus', handleActive);
@@ -1502,6 +1549,16 @@ export default function ChatApp() {
 
     // UI'dan tezkor o'chirish va keshni yangilash
     updateMessagesState((prev) => prev.filter((m) => m.id !== targetId));
+    deleteCachedMessage(targetId);
+
+    // Sherik ekranidan ham darhol o'chirish (0ms broadcast)
+    if (realtimeChannelRef.current) {
+      realtimeChannelRef.current.send({
+        type: 'broadcast',
+        event: 'message_deleted',
+        payload: { id: targetId }
+      }).catch(() => {});
+    }
 
     if (supabase) {
       await supabase.from('messages').delete().eq('id', targetId);
