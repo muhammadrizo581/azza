@@ -37,6 +37,57 @@ function formatDuration(sec?: number) {
   return `${m}:${s < 10 ? '0' : ''}${s}`;
 }
 
+// OXIRGI KIRGAN VAQTNI TELEGRAM USLUBIDA FORMATLASH
+function formatLastSeen(isoString?: string | null): string {
+  if (!isoString) return 'oxirgi marta yaqinda';
+  try {
+    const date = new Date(isoString);
+    if (isNaN(date.getTime())) return 'oxirgi marta yaqinda';
+
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    if (diffMs < 0) return 'online';
+
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+
+    if (diffMin < 1) return 'hozirgina chiqdi';
+    if (diffMin < 2) return '1 daqiqa oldin onlayn edi';
+    if (diffMin < 5) return `${diffMin} daqiqa oldin onlayn edi`;
+
+    const isToday =
+      date.getDate() === now.getDate() &&
+      date.getMonth() === now.getMonth() &&
+      date.getFullYear() === now.getFullYear();
+
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    const isYesterday =
+      date.getDate() === yesterday.getDate() &&
+      date.getMonth() === yesterday.getMonth() &&
+      date.getFullYear() === yesterday.getFullYear();
+
+    const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    if (isToday) {
+      return `oxirgi marta bugun ${timeStr} da`;
+    }
+    if (isYesterday) {
+      return `oxirgi marta kecha ${timeStr} da`;
+    }
+
+    const day = date.getDate();
+    const months = [
+      'yanvar', 'fevral', 'mart', 'aprel', 'may', 'iyun',
+      'iyul', 'avgust', 'sentabr', 'oktabr', 'noyabr', 'dekabr'
+    ];
+    const monthStr = months[date.getMonth()];
+    return `oxirgi marta ${day}-${monthStr} ${timeStr} da`;
+  } catch {
+    return 'oxirgi marta yaqinda';
+  }
+}
+
 // TELEGRAM YUMALOQ VIDEO NOTE KOMPONENTI (TORTBURCHAKSIZ, BORDERSIZ, TOZA YUMALOQ)
 function TelegramVideoNote({
   msg,
@@ -286,6 +337,14 @@ export default function ChatApp() {
   const [swipeOffset, setSwipeOffset] = useState<number>(0);
   const touchStartPosRef = useRef<{ x: number; y: number; msgId: string } | null>(null);
 
+  // ONLAYN VA TYPING STATUS (JONLI KUZATISH)
+  const [isPartnerOnline, setIsPartnerOnline] = useState(false);
+  const [isPartnerTyping, setIsPartnerTyping] = useState(false);
+  const [partnerLastSeen, setPartnerLastSeen] = useState<string | null>(null);
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const realtimeChannelRef = useRef<any>(null);
+  const lastTypingSentRef = useRef<number>(0);
+
   // VOICE RECORDING
   const [isRecording, setIsRecording] = useState(false);
   const isRecordingRef = useRef<boolean>(false);
@@ -373,6 +432,11 @@ export default function ChatApp() {
       const savedUser = localStorage.getItem('azza_auth_user');
       if (savedUser === 'me' || savedUser === 'partner') {
         setCurrentUser(savedUser);
+        const partnerKey = savedUser === 'me' ? 'partner' : 'me';
+        const savedLastSeen = localStorage.getItem(`azza_last_seen_${partnerKey}`);
+        if (savedLastSeen) {
+          setPartnerLastSeen(savedLastSeen);
+        }
       }
       const cached = localStorage.getItem('azza_chat_cache');
       if (cached) {
@@ -386,6 +450,15 @@ export default function ChatApp() {
     } finally {
       setIsAuthChecking(false);
     }
+  }, []);
+
+  // Oxirgi kirgan vaqtni har 30 soniyada yangilab turish (masalan: "hozirgina chiqdi" -> "1 daqiqa oldin...")
+  const [, setLastSeenTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLastSeenTick((prev) => prev + 1);
+    }, 30000);
+    return () => clearInterval(timer);
   }, []);
 
   // Xabarlar har o'zgarganda keshni yangilab borish
@@ -443,7 +516,7 @@ export default function ChatApp() {
 
   // 2. Xabarlarni Supabase orqali yuklash (Ultra-fast)
   const loadMessages = async () => {
-    if (!supabase) return;
+    if (!supabase || currentUser === 'guest') return;
     try {
       const { data, error } = await supabase
         .from('messages')
@@ -452,7 +525,29 @@ export default function ChatApp() {
         .limit(200);
 
       if (!error && data) {
-        const parsedList = data.map(parseIncomingMsg);
+        const partnerKey = currentUser === 'me' ? 'partner' : 'me';
+
+        // Sherikning oxirgi ko'ringan vaqtini olish
+        const statusRow = data.find((r: any) => 
+          r.id === `status_${partnerKey}` || 
+          (typeof r.text === 'string' && r.text.startsWith('__STATUS__:') && r.sender_id === partnerKey)
+        );
+        if (statusRow) {
+          try {
+            const parsed = JSON.parse(statusRow.text.replace('__STATUS__:', ''));
+            if (parsed.last_seen) {
+              setPartnerLastSeen(parsed.last_seen);
+              try { localStorage.setItem(`azza_last_seen_${partnerKey}`, parsed.last_seen); } catch {}
+            }
+          } catch {}
+        }
+
+        // Status qatorlarini chat xabarlaridan chiqarib tashlaymiz
+        const chatRows = data.filter((r: any) => 
+          !r.id?.startsWith('status_') && 
+          !(typeof r.text === 'string' && r.text.startsWith('__STATUS__:'))
+        );
+        const parsedList = chatRows.map(parseIncomingMsg);
         updateMessagesState(parsedList);
       }
     } catch (e) {
@@ -466,16 +561,60 @@ export default function ChatApp() {
     }
   }, [currentUser]);
 
-  // 3. Supabase Realtime (INSERT, UPDATE, DELETE)
+  // 3. Supabase Realtime (Presence, Broadcast Typing, va DB Changes)
   useEffect(() => {
     const client = supabase;
     if (!client || currentUser === 'guest') return;
 
-    const channel = client
-      .channel('chat_room')
+    const partnerKey = currentUser === 'me' ? 'partner' : 'me';
+
+    // O'zimizning statusimizni Supabase'ga yozish (oxirgi ko'ringan vaqt)
+    const updateMyStatus = async () => {
+      const nowIso = new Date().toISOString();
+      try {
+        await client.from('messages').upsert({
+          id: `status_${currentUser}`,
+          sender_id: currentUser,
+          text: `__STATUS__:${JSON.stringify({ last_seen: nowIso })}`,
+          created_at: nowIso,
+          is_read: true
+        });
+      } catch {}
+    };
+
+    updateMyStatus();
+    const heartbeatTimer = setInterval(updateMyStatus, 35000);
+
+    const channel = client.channel('chat_room', {
+      config: {
+        presence: {
+          key: currentUser
+        }
+      }
+    });
+    realtimeChannelRef.current = channel;
+
+    channel
       .on('postgres_changes', { event: '*', schema: 'public', table: 'messages' }, (payload) => {
+        const record = (payload.new || payload.old) as any;
+        if (record && (record.id?.startsWith('status_') || (typeof record.text === 'string' && record.text.startsWith('__STATUS__:')))) {
+          if (payload.eventType !== 'DELETE' && record.id === `status_${partnerKey}`) {
+            try {
+              const parsed = JSON.parse(record.text.replace('__STATUS__:', ''));
+              if (parsed.last_seen) {
+                setPartnerLastSeen(parsed.last_seen);
+              }
+            } catch {}
+          }
+          return;
+        }
+
         if (payload.eventType === 'INSERT') {
           const newMsg = parseIncomingMsg(payload.new);
+          if (newMsg.sender_id === partnerKey) {
+            setIsPartnerOnline(true);
+            setIsPartnerTyping(false);
+          }
           updateMessagesState((prev) => {
             if (prev.some((m) => m.id === newMsg.id)) return prev;
             return [...prev, newMsg];
@@ -492,10 +631,74 @@ export default function ChatApp() {
           });
         }
       })
-      .subscribe();
+      .on('presence', { event: 'sync' }, () => {
+        const state = channel.presenceState();
+        const isPresent = Boolean(state[partnerKey] && state[partnerKey].length > 0);
+        setIsPartnerOnline(isPresent);
+      })
+      .on('presence', { event: 'join' }, ({ key }) => {
+        if (key === partnerKey) {
+          setIsPartnerOnline(true);
+        }
+      })
+      .on('presence', { event: 'leave' }, ({ key }) => {
+        if (key === partnerKey) {
+          setIsPartnerOnline(false);
+          setIsPartnerTyping(false);
+          const nowIso = new Date().toISOString();
+          setPartnerLastSeen(nowIso);
+          try { localStorage.setItem(`azza_last_seen_${partnerKey}`, nowIso); } catch {}
+        }
+      })
+      .on('broadcast', { event: 'typing' }, (payload) => {
+        if (payload?.payload?.user === partnerKey) {
+          const isTyping = Boolean(payload.payload.isTyping);
+          setIsPartnerTyping(isTyping);
+          if (isTyping) {
+            setIsPartnerOnline(true);
+            if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+            typingTimeoutRef.current = setTimeout(() => {
+              setIsPartnerTyping(false);
+            }, 3500);
+          }
+        }
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          await channel.track({
+            user: currentUser,
+            online_at: new Date().toISOString()
+          });
+        }
+      });
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        updateMyStatus();
+      } else {
+        updateMyStatus();
+        channel.track({
+          user: currentUser,
+          online_at: new Date().toISOString()
+        }).catch(() => {});
+      }
+    };
+
+    const handleBeforeUnload = () => {
+      updateMyStatus();
+    };
+
+    window.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
+      clearInterval(heartbeatTimer);
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      window.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      updateMyStatus();
       client.removeChannel(channel);
+      realtimeChannelRef.current = null;
     };
   }, [currentUser]);
 
@@ -605,6 +808,15 @@ export default function ChatApp() {
     setReplyingTo(null);
     replyingToRef.current = null;
 
+    // Yozishni to'xtatish haqida darhol xabar berish
+    if (realtimeChannelRef.current) {
+      realtimeChannelRef.current.send({
+        type: 'broadcast',
+        event: 'typing',
+        payload: { user: currentUser, isTyping: false }
+      }).catch(() => {});
+    }
+
     if (supabase) {
       const payloadText = replyData
         ? `__PAYLOAD_JSON__:${JSON.stringify({ text: newMsg.text, reply_to: replyData })}`
@@ -628,6 +840,31 @@ export default function ChatApp() {
     }
 
     inputRef.current?.focus();
+  };
+
+  // Matn yozilayotganda typing statusini jonli uzatish
+  const handleInputChange = (val: string) => {
+    setInputText(val);
+
+    if (!realtimeChannelRef.current || currentUser === 'guest') return;
+
+    const now = Date.now();
+    if (val.trim()) {
+      if (now - lastTypingSentRef.current > 1200) {
+        lastTypingSentRef.current = now;
+        realtimeChannelRef.current.send({
+          type: 'broadcast',
+          event: 'typing',
+          payload: { user: currentUser, isTyping: true }
+        }).catch(() => {});
+      }
+    } else {
+      realtimeChannelRef.current.send({
+        type: 'broadcast',
+        event: 'typing',
+        payload: { user: currentUser, isTyping: false }
+      }).catch(() => {});
+    }
   };
 
   // XABARNI BOSIB TURISH (LONG PRESS) VA SWIPE TO REPLY
@@ -1597,18 +1834,42 @@ export default function ChatApp() {
       <header className="safe-top shrink-0 bg-[#17212b] border-b border-[#202b36] px-3 pb-2.5 flex items-center justify-between z-30 shadow">
         <div 
           onClick={() => setShowProfileDrawer(true)}
-          className="flex items-center space-x-2.5 cursor-pointer active:opacity-80"
+          className="flex items-center space-x-2.5 cursor-pointer active:opacity-80 min-w-0"
         >
-          <div className="relative w-10 h-10 rounded-full bg-gradient-to-tr from-rose-500 via-pink-500 to-indigo-500 flex items-center justify-center font-bold text-base text-white shadow-md">
+          <div className="relative w-10 h-10 rounded-full bg-gradient-to-tr from-rose-500 via-pink-500 to-indigo-500 flex items-center justify-center font-bold text-base text-white shadow-md shrink-0">
             <span>{partnerDisplayName[0].toUpperCase()}</span>
-            <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 border-2 border-[#17212b] rounded-full"></span>
+            {isPartnerOnline && (
+              <span className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-[#17212b] ${
+                isPartnerTyping ? 'bg-[#6ab2f2] animate-ping' : 'bg-emerald-500'
+              }`}></span>
+            )}
+            {isPartnerOnline && isPartnerTyping && (
+              <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-[#17212b] bg-[#6ab2f2]"></span>
+            )}
           </div>
-          <div>
+          <div className="min-w-0">
             <div className="flex items-center space-x-1">
-              <span className="font-semibold text-sm sm:text-base leading-tight">{partnerDisplayName}</span>
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+              <span className="font-semibold text-sm sm:text-base leading-tight truncate">{partnerDisplayName}</span>
+              <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
             </div>
-            <span className="text-xs text-emerald-400 font-medium">onlayn</span>
+
+            {/* STATUS: typing... / online / oxirgi kirgan vaqti */}
+            {isPartnerTyping ? (
+              <span className="text-xs text-[#6ab2f2] font-medium flex items-center space-x-1 animate-pulse">
+                <span>typing...</span>
+                <span className="flex space-x-0.5 ml-0.5">
+                  <span className="w-1 h-1 bg-[#6ab2f2] rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                  <span className="w-1 h-1 bg-[#6ab2f2] rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                  <span className="w-1 h-1 bg-[#6ab2f2] rounded-full animate-bounce"></span>
+                </span>
+              </span>
+            ) : isPartnerOnline ? (
+              <span className="text-xs text-emerald-400 font-medium">online</span>
+            ) : (
+              <span className="text-xs text-[#7f91a4] font-normal truncate block max-w-[190px]">
+                {formatLastSeen(partnerLastSeen)}
+              </span>
+            )}
           </div>
         </div>
 
@@ -1854,7 +2115,7 @@ export default function ChatApp() {
                 if (editingMessage) {
                   setEditText(prev => prev + emoji);
                 } else {
-                  setInputText(prev => prev + emoji);
+                  handleInputChange(inputText + emoji);
                 }
                 setShowEmojiPicker(false);
               }}
@@ -1993,7 +2254,7 @@ export default function ChatApp() {
               ref={inputRef}
               type="text"
               value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
+              onChange={(e) => handleInputChange(e.target.value)}
               placeholder="Xabar yozing..."
               className="flex-1 min-w-0 bg-[#242f3d] text-white text-[15px] rounded-full px-4 py-2.5 focus:outline-none focus:ring-1.5 focus:ring-[#6ab2f2] placeholder-[#7f91a4]"
               autoComplete="off"
