@@ -27,6 +27,7 @@ import {
   Reply,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Download
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
@@ -415,6 +416,20 @@ export default function ChatApp() {
   const [authError, setAuthError] = useState('');
 
   const [messages, setMessages] = useState<Message[]>([]);
+  const messagesRef = useRef<Message[]>([]);
+  messagesRef.current = messages;
+
+  // TEPAGA SCROLL QILGANDA ESKI XABARLARNI YUKLASH (REVERSE PAGINATION)
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const isLoadingOlderRef = useRef(false);
+  const [hasMoreOlder, setHasMoreOlder] = useState(true);
+  const hasMoreOlderRef = useRef(true);
+  const chatScrollContainerRef = useRef<HTMLElement | null>(null);
+
+  // TELEGRAM PASTGA TUSHIRISH TUGMASI (SCROLL TO BOTTOM FAB)
+  const [showScrollBottomBtn, setShowScrollBottomBtn] = useState(false);
+  const [unreadBottomCount, setUnreadBottomCount] = useState(0);
+
   const [inputText, setInputText] = useState('');
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showProfileDrawer, setShowProfileDrawer] = useState(false);
@@ -632,22 +647,29 @@ export default function ChatApp() {
     };
   };
 
-  // 2. Xabarlarni Supabase orqali ultra-tezkor (2 bosqichli) yuklash
+  // 2. Xabarlarni Supabase orqali yuklash (Dastlab faqat eng oxirgi 30 ta xabar)
   const loadMessages = async () => {
     if (!supabase || currentUser === 'guest') return;
     const partnerKey = currentUser === 'me' ? 'partner' : 'me';
 
     try {
-      // 1-BOSQICH: ENG YANGI 40 TA XABARNI BIR LAHZADA (50-80ms) YUKLASH
-      // Bu foydalanuvchiga kutmasdan eng oxirgi xabarlar, galochkalar va reaksiyalarni ko'rsatadi
+      // DASTLAB FAQAT ENG OXIRGI 30 TA XABARNI TEZKOR (50ms) YUKLASH
       const { data: recentRows, error: recentError } = await supabase
         .from('messages')
         .select('*')
         .order('created_at', { ascending: false })
-        .limit(40);
+        .limit(30);
 
       if (!recentError && recentRows && recentRows.length > 0) {
-        // Chronological tartibga keltiramiz
+        if (recentRows.length < 30) {
+          hasMoreOlderRef.current = false;
+          setHasMoreOlder(false);
+        } else {
+          hasMoreOlderRef.current = true;
+          setHasMoreOlder(true);
+        }
+
+        // Chronological tartibga keltiramiz (tepada eski, pastda eng yangi)
         recentRows.reverse();
 
         // Sherikning oxirgi ko'ringan vaqtini olish
@@ -671,48 +693,109 @@ export default function ChatApp() {
 
         // Darhol ekranga chiqaramiz
         updateMessagesState((prev) => mergeMessageLists(prev, chatRecent));
-      }
 
-      // 2-BOSQICH: FONDA BUTUN TARIXNI (OLDINGI BARCHA XABARLARNI) TO'LIQ YUKLASH
-      let allRows: any[] = [];
-      let page = 0;
-      const pageSize = 1000;
-      let hasMore = true;
-
-      while (hasMore) {
-        const { data, error } = await supabase
-          .from('messages')
-          .select('*')
-          .order('created_at', { ascending: true })
-          .range(page * pageSize, (page + 1) * pageSize - 1);
-
-        if (error) break;
-
-        if (data && data.length > 0) {
-          allRows.push(...data);
-          if (data.length < pageSize) {
-            hasMore = false;
-          } else {
-            page++;
-          }
-        } else {
-          hasMore = false;
-        }
-      }
-
-      if (allRows.length > 0) {
-        const chatRows = allRows.filter((r: any) => 
-          !r.id?.startsWith('status_') && 
-          !(typeof r.text === 'string' && r.text.startsWith('__STATUS__:'))
-        );
-        const parsedList = chatRows.map(parseIncomingMsg);
-        
-        // Keshdagi va serverdan kelgan barcha xabarlarni birortasini yo'qotmasdan birlashtiramiz
-        updateMessagesState((prev) => mergeMessageLists(prev, parsedList));
+        // Dastlabki yuklashda pastga scroll qilamiz
+        setTimeout(() => {
+          messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+        }, 60);
       }
     } catch (e) {
       console.error('Fetch error:', e);
     }
+  };
+
+  // TEPAGA SCROLL QILGANDA OLDINGI ESKI XABARLARNI YUKLASH (OPTIMAL VA TEZ)
+  const loadMoreOlderMessages = useCallback(async () => {
+    if (isLoadingOlderRef.current || !hasMoreOlderRef.current || !supabase || currentUser === 'guest') {
+      return;
+    }
+    const container = chatScrollContainerRef.current;
+    if (!container) return;
+
+    const currentList = messagesRef.current;
+    if (!currentList || currentList.length === 0) return;
+
+    const oldestMsg = currentList[0];
+    if (!oldestMsg) return;
+
+    isLoadingOlderRef.current = true;
+    setIsLoadingOlder(true);
+
+    const prevScrollHeight = container.scrollHeight;
+    const prevScrollTop = container.scrollTop;
+
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .lt('created_at', oldestMsg.created_at)
+        .order('created_at', { ascending: false })
+        .limit(25);
+
+      if (error || !data) {
+        isLoadingOlderRef.current = false;
+        setIsLoadingOlder(false);
+        return;
+      }
+
+      if (data.length < 25) {
+        hasMoreOlderRef.current = false;
+        setHasMoreOlder(false);
+      }
+
+      const olderChatRows = data.filter((r: any) => 
+        !r.id?.startsWith('status_') && 
+        !(typeof r.text === 'string' && r.text.startsWith('__STATUS__:'))
+      );
+
+      if (olderChatRows.length > 0) {
+        olderChatRows.reverse(); // chronological tartibga
+        const parsedOlder = olderChatRows.map(parseIncomingMsg);
+
+        // Xabarlar ro'yxatining tepasiga qo'shamiz
+        updateMessagesState((prev) => mergeMessageLists(parsedOlder, prev));
+
+        // Scroll o'rnini saqlab qolamiz (ekran sakrab ketmasligi uchun)
+        requestAnimationFrame(() => {
+          if (chatScrollContainerRef.current) {
+            const newScrollHeight = chatScrollContainerRef.current.scrollHeight;
+            chatScrollContainerRef.current.scrollTop = newScrollHeight - prevScrollHeight + prevScrollTop;
+          }
+        });
+      }
+    } catch (e) {
+      console.error('Older messages fetch error:', e);
+    } finally {
+      isLoadingOlderRef.current = false;
+      setIsLoadingOlder(false);
+    }
+  }, [currentUser]);
+
+  // TEPAGA SCROLL QILGANDA AVTOMATIK YUKLASH VA PASTGA TUSHISH TUGMASI HANDLERI
+  const handleChatScroll = () => {
+    const el = chatScrollContainerRef.current;
+    if (!el) return;
+
+    // 1. Tepaga yaqinlashganda eski xabarlarni yuklash
+    if (el.scrollTop < 120 && hasMoreOlderRef.current && !isLoadingOlderRef.current) {
+      loadMoreOlderMessages();
+    }
+
+    // 2. Pastga tushirish tugmasi (pastdan 220px dan yuqoriga chiqsa chiqadi)
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowScrollBottomBtn(distFromBottom > 220);
+
+    // 3. Agar eng pastga yetgan bo'lsa, hisoblagichni tozalaymiz
+    if (distFromBottom < 60) {
+      setUnreadBottomCount(0);
+    }
+  };
+
+  // ENG PASTGA BIR SMOOTH TUSHIRISH FUNKSIYASI
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    setUnreadBottomCount(0);
+    setShowScrollBottomBtn(false);
   };
 
   useEffect(() => {
@@ -774,6 +857,10 @@ export default function ChatApp() {
           if (newMsg.sender_id === partnerKey) {
             setIsPartnerOnline(true);
             setIsPartnerTyping(false);
+            const el = chatScrollContainerRef.current;
+            if (el && el.scrollHeight - el.scrollTop - el.clientHeight > 200) {
+              setUnreadBottomCount((prev) => prev + 1);
+            }
           }
           updateMessagesState((prev) => {
             if (prev.some((m) => m.id === newMsg.id)) return prev;
@@ -942,8 +1029,10 @@ export default function ChatApp() {
     };
   }, [currentUser, messages, markPartnerMessagesAsRead]);
 
-  // Pastga scroll qilish
+  // Pastga scroll qilish (faqat yangi xabarlarda, eski xabarlar yuklanayotganda sakramaydi)
   useEffect(() => {
+    if (isLoadingOlderRef.current) return;
+
     if (currentUser !== 'guest' && !editingMessage) {
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -2276,7 +2365,26 @@ export default function ChatApp() {
       </header>
 
       {/* CHAT XABARLARI */}
-      <main className="flex-1 overflow-y-auto px-3 py-3 tg-chat-bg space-y-2.5 overscroll-contain">
+      <main 
+        ref={chatScrollContainerRef}
+        onScroll={handleChatScroll}
+        className="flex-1 overflow-y-auto px-3 py-3 tg-chat-bg space-y-2.5 overscroll-contain"
+      >
+        {/* TEPAGA SCROLL QILGANDA ESKI XABARLAR YUKLANISHI (SPINNER) */}
+        {isLoadingOlder && (
+          <div className="flex items-center justify-center py-2 select-none animate-in fade-in duration-150">
+            <div className="w-5 h-5 border-2 border-[#6ab2f2] border-t-transparent rounded-full animate-spin"></div>
+            <span className="text-[11px] text-[#7f91a4] ml-2 font-medium">Eski xabarlar yuklanmoqda...</span>
+          </div>
+        )}
+
+        {!hasMoreOlder && messages.length > 20 && (
+          <div className="flex justify-center my-1.5 select-none">
+            <span className="px-3 py-0.5 bg-[#182533]/70 text-[10px] text-[#7f91a4] rounded-full border border-white/5">
+              Chat boshlanishi
+            </span>
+          </div>
+        )}
         
         <div className="flex justify-center my-1 select-none">
           <span className="px-3 py-0.5 bg-[#182533]/90 text-[11px] text-[#7f91a4] rounded-full">
@@ -2520,6 +2628,23 @@ export default function ChatApp() {
 
         <div ref={messagesEndRef} />
       </main>
+
+      {/* TELEGRAM USLUBIDAGI ENG PASTGA TUSHIRISH TUGMASI (SCROLL TO BOTTOM FAB) */}
+      {showScrollBottomBtn && (
+        <button
+          type="button"
+          onClick={scrollToBottom}
+          className="absolute right-4 bottom-20 z-30 w-11 h-11 rounded-full bg-[#182533]/90 hover:bg-[#202f40] active:bg-[#283b50] text-[#6ab2f2] border border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.5)] backdrop-blur-md flex items-center justify-center transition-all duration-200 active:scale-90 cursor-pointer animate-in fade-in zoom-in-75 duration-200 group"
+          title="Eng pastga tushish"
+        >
+          <ChevronDown className="w-6 h-6 text-[#6ab2f2] transition-transform group-hover:translate-y-0.5" />
+          {unreadBottomCount > 0 && (
+            <span className="absolute -top-1.5 -left-1.5 bg-[#6ab2f2] text-white text-[10px] font-bold px-1.5 py-0.2 min-w-[18px] h-[18px] rounded-full flex items-center justify-center shadow-lg border-2 border-[#182533] animate-in zoom-in duration-150">
+              {unreadBottomCount > 99 ? '99+' : unreadBottomCount}
+            </span>
+          )}
+        </button>
+      )}
 
       {/* COPIED TOAST BILDIRISHNOMA */}
       {copiedToast && (
