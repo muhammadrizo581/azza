@@ -42,7 +42,8 @@ import {
 // RASMLARNI SIFATLI VA TEZKOR QISQARTIRISH (KVOTA TO'LIB QOLMASLIGI UCHUN)
 function compressImageFile(file: File): Promise<string> {
   return new Promise((resolve) => {
-    if (file.size < 120 * 1024) {
+    // Agar fayl allaqachon ixcham (100KB dan kam) bo'lsa
+    if (file.size < 100 * 1024 && (file.type.includes('jpeg') || file.type.includes('png') || file.type.includes('webp'))) {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result as string);
       reader.onerror = () => resolve('');
@@ -54,7 +55,7 @@ function compressImageFile(file: File): Promise<string> {
     const url = URL.createObjectURL(file);
     img.onload = () => {
       URL.revokeObjectURL(url);
-      const MAX_DIM = 1280;
+      const MAX_DIM = 1200;
       let { width, height } = img;
       if (width > height) {
         if (width > MAX_DIM) {
@@ -74,7 +75,7 @@ function compressImageFile(file: File): Promise<string> {
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL('image/jpeg', 0.82));
+        resolve(canvas.toDataURL('image/jpeg', 0.78));
       } else {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result as string);
@@ -618,7 +619,7 @@ export default function ChatApp() {
       try {
         const parsed = JSON.parse(text.replace('__PAYLOAD_JSON__:', ''));
         text = parsed.text || '';
-        media_url = parsed.media_url || media_url;
+        media_url = (parsed.media_url && parsed.media_url !== '[cached]') ? parsed.media_url : media_url;
         media_urls = parsed.media_urls || media_urls;
         media_type = parsed.media_type || media_type;
         duration = parsed.duration !== undefined ? parsed.duration : duration;
@@ -629,6 +630,28 @@ export default function ChatApp() {
           is_read = Boolean(parsed.is_read);
         }
       } catch {}
+    }
+
+    if (media_url === '[cached]') {
+      media_url = undefined;
+    }
+
+    if (!media_url && Array.isArray(media_urls) && media_urls.length > 0) {
+      media_url = media_urls[0];
+    }
+    if (!media_urls && media_url && (media_type === 'image' || media_url.startsWith('data:image/'))) {
+      media_urls = [media_url];
+    }
+
+    // Har doim media_type ni aniqlash (hech qachon yo'qolib qolmasligi uchun)
+    if (!media_type) {
+      if (media_url?.startsWith('data:audio/') || media_url?.includes('audio/') || media_url?.match(/\.(mp3|wav|ogg|m4a|mp4|aac)$/i)) {
+        media_type = 'voice';
+      } else if (media_url?.startsWith('data:image/') || media_url?.includes('image/') || (media_urls && media_urls.length > 0) || media_url?.match(/\.(jpeg|jpg|png|webp|gif)$/i)) {
+        media_type = 'image';
+      } else if (media_url?.startsWith('data:video/') || media_url?.includes('video/')) {
+        media_type = 'video_note';
+      }
     }
 
     return {
@@ -863,23 +886,94 @@ export default function ChatApp() {
             }
           }
           updateMessagesState((prev) => {
-            if (prev.some((m) => m.id === newMsg.id)) return prev;
+            if (prev.some((m) => m.id === newMsg.id)) {
+              return prev.map((m) => (m.id === newMsg.id ? {
+                ...m,
+                ...newMsg,
+                text: (newMsg.text && newMsg.text.trim()) ? newMsg.text : m.text,
+                media_type: newMsg.media_type || m.media_type,
+                media_url: (newMsg.media_url && newMsg.media_url !== '[cached]') ? newMsg.media_url : m.media_url,
+                media_urls: (newMsg.media_urls && newMsg.media_urls.length > 0) ? newMsg.media_urls : m.media_urls,
+                duration: newMsg.duration !== undefined ? newMsg.duration : m.duration
+              } : m));
+            }
             return [...prev, newMsg];
           });
         } else if (payload.eventType === 'UPDATE') {
-          const updatedMsg = parseIncomingMsg(payload.new);
+          const rawRecord = payload.new as any;
+          if (!rawRecord || !rawRecord.id) return;
+
           updateMessagesState((prev) => {
-            return prev.map((m) => (m.id === updatedMsg.id ? {
-              ...m,
-              ...updatedMsg,
-              media_url: updatedMsg.media_url || m.media_url,
-              media_urls: (updatedMsg.media_urls && updatedMsg.media_urls.length > 0) ? updatedMsg.media_urls : m.media_urls
-            } : m));
+            return prev.map((m) => {
+              if (m.id !== rawRecord.id) return m;
+
+              let incoming: Partial<Message> = {};
+              if (typeof rawRecord.text === 'string' && rawRecord.text.trim()) {
+                incoming = parseIncomingMsg(rawRecord);
+              } else {
+                if (rawRecord.is_read !== undefined) {
+                  incoming.is_read = Boolean(rawRecord.is_read === true || rawRecord.is_read === 'true');
+                }
+                if (rawRecord.reactions !== undefined) {
+                  incoming.reactions = rawRecord.reactions;
+                }
+                if (rawRecord.is_edited !== undefined) {
+                  incoming.is_edited = Boolean(rawRecord.is_edited);
+                }
+              }
+
+              const mergedText = (incoming.text && incoming.text.trim()) ? incoming.text : m.text;
+              const mergedMediaUrl = (incoming.media_url && incoming.media_url !== '[cached]') 
+                ? incoming.media_url 
+                : (m.media_url && m.media_url !== '[cached]') ? m.media_url : incoming.media_url;
+              const mergedMediaUrls = (incoming.media_urls && incoming.media_urls.length > 0) 
+                ? incoming.media_urls 
+                : m.media_urls;
+
+              let mergedMediaType = incoming.media_type || m.media_type;
+              if (!mergedMediaType) {
+                if (mergedMediaUrl?.startsWith('data:audio/') || mergedMediaUrl?.includes('audio/')) {
+                  mergedMediaType = 'voice';
+                } else if (mergedMediaUrl?.startsWith('data:image/') || mergedMediaUrl?.includes('image/') || (mergedMediaUrls && mergedMediaUrls.length > 0)) {
+                  mergedMediaType = 'image';
+                } else if (mergedMediaUrl?.startsWith('data:video/') || mergedMediaUrl?.includes('video/')) {
+                  mergedMediaType = 'video_note';
+                }
+              }
+
+              return {
+                ...m,
+                ...incoming,
+                text: mergedText,
+                media_type: mergedMediaType,
+                media_url: mergedMediaUrl,
+                media_urls: mergedMediaUrls,
+                duration: incoming.duration !== undefined ? incoming.duration : m.duration,
+                reply_to: incoming.reply_to !== undefined ? incoming.reply_to : m.reply_to,
+                is_read: incoming.is_read !== undefined ? incoming.is_read : m.is_read,
+                is_edited: incoming.is_edited !== undefined ? incoming.is_edited : m.is_edited
+              };
+            });
           });
         } else if (payload.eventType === 'DELETE') {
           const deletedId = (payload.old as { id: string }).id;
           updateMessagesState((prev) => {
             return prev.filter((m) => m.id !== deletedId);
+          });
+        }
+      })
+      .on('broadcast', { event: 'new_message' }, ({ payload }) => {
+        if (payload && payload.id && payload.sender_id === partnerKey) {
+          const parsed = parseIncomingMsg(payload);
+          setIsPartnerOnline(true);
+          setIsPartnerTyping(false);
+          const el = chatScrollContainerRef.current;
+          if (el && el.scrollHeight - el.scrollTop - el.clientHeight > 200) {
+            setUnreadBottomCount((prev) => prev + 1);
+          }
+          updateMessagesState((prev) => {
+            if (prev.some((m) => m.id === parsed.id)) return prev;
+            return [...prev, parsed];
           });
         }
       })
@@ -1141,12 +1235,18 @@ export default function ChatApp() {
     setReplyingTo(null);
     replyingToRef.current = null;
 
-    // Yozishni to'xtatish haqida darhol xabar berish
+    // Yozishni to'xtatish va yangi xabarni real-vaqtda darhol uzatish
     if (realtimeChannelRef.current) {
       realtimeChannelRef.current.send({
         type: 'broadcast',
         event: 'typing',
         payload: { user: currentUser, isTyping: false }
+      }).catch(() => {});
+
+      realtimeChannelRef.current.send({
+        type: 'broadcast',
+        event: 'new_message',
+        payload: newMsg
       }).catch(() => {});
     }
 
@@ -1499,6 +1599,14 @@ export default function ChatApp() {
 
     updateMessagesState((prev) => [...prev, newMsg]);
 
+    if (realtimeChannelRef.current) {
+      realtimeChannelRef.current.send({
+        type: 'broadcast',
+        event: 'new_message',
+        payload: newMsg
+      }).catch(() => {});
+    }
+
     if (supabase) {
       const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({
         text: '',
@@ -1569,8 +1677,16 @@ export default function ChatApp() {
         }
       }
 
-      const options = mimeType ? { mimeType } : undefined;
-      const mediaRecorder = new MediaRecorder(stream, options);
+      const recorderOptions: MediaRecorderOptions = {};
+      if (mimeType) recorderOptions.mimeType = mimeType;
+      recorderOptions.audioBitsPerSecond = 32000;
+
+      let mediaRecorder: MediaRecorder;
+      try {
+        mediaRecorder = new MediaRecorder(stream, recorderOptions);
+      } catch {
+        mediaRecorder = new MediaRecorder(stream);
+      }
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
@@ -1632,6 +1748,14 @@ export default function ChatApp() {
           };
 
           updateMessagesState((prev) => [...prev, newMsg]);
+
+          if (realtimeChannelRef.current) {
+            realtimeChannelRef.current.send({
+              type: 'broadcast',
+              event: 'new_message',
+              payload: newMsg
+            }).catch(() => {});
+          }
 
           if (supabase) {
             const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({
@@ -1895,6 +2019,14 @@ export default function ChatApp() {
           };
 
           updateMessagesState((prev) => [...prev, newMsg]);
+
+          if (realtimeChannelRef.current) {
+            realtimeChannelRef.current.send({
+              type: 'broadcast',
+              event: 'new_message',
+              payload: newMsg
+            }).catch(() => {});
+          }
 
           if (supabase) {
             const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({
@@ -2398,7 +2530,8 @@ export default function ChatApp() {
           const isMsgSelected = selectedMessage?.id === msg.id;
 
           // TELEGRAM YUMALOQ VIDEO (TORTBURCHAKSIZ, TOZA YUMALOQ VA BORDERSIZ)
-          if (msg.media_type === 'video_note' && msg.media_url) {
+          const isVideoNote = Boolean((msg.media_type === 'video_note' || (msg.media_url && msg.media_url.startsWith('data:video/'))) && msg.media_url && msg.media_url !== '[cached]');
+          if (isVideoNote) {
             return (
               <TelegramVideoNote
                 key={msg.id}
@@ -2420,6 +2553,16 @@ export default function ChatApp() {
                 }}
               />
             );
+          }
+
+          // Rasmlar, ovozlar va matn holatini aniqlash
+          const isVoice = Boolean((msg.media_type === 'voice' || (msg.media_url && (msg.media_url.startsWith('data:audio/') || msg.media_url.includes('audio/')))) && msg.media_url && msg.media_url !== '[cached]');
+          const isImage = Boolean((msg.media_type === 'image' || (msg.media_url && (msg.media_url.startsWith('data:image/') || msg.media_url.includes('image/'))) || (msg.media_urls && msg.media_urls.length > 0)) && (msg.media_url || (msg.media_urls && msg.media_urls.length > 0)));
+          const hasText = Boolean(msg.text && msg.text.trim());
+
+          // Agar xabarda umuman hech qanday ma'lumot (matn, rasm, ovoz) bo'lmasa, bo'sh space (bubble) chizilmasin!
+          if (!isVoice && !isImage && !hasText) {
+            return null;
           }
 
           // ODDIY XABARLAR (TEXT, RASM, GOLOS) - PUFAKCHA BILAN
@@ -2494,7 +2637,7 @@ export default function ChatApp() {
                   </div>
                 )}
                 {/* RASMLAR KO'RINISHI (TELEGRAM USLUBIDA 1 TA YOKI BIR NECHTA RASMLAR ALBOMI) */}
-                {msg.media_type === 'image' && (
+                {isImage && (
                   <div className="mb-1 rounded-xl overflow-hidden">
                     {msg.media_urls && msg.media_urls.length > 1 ? (
                       <div className={`grid gap-1 ${msg.media_urls.length === 2 ? 'grid-cols-2' : 'grid-cols-2'}`}>
@@ -2535,7 +2678,7 @@ export default function ChatApp() {
                 )}
 
                 {/* GOLOS (OVOZ) KO'RINISHI - DURATION DASTURIY VA ANIQ KO'RSATILADI */}
-                {msg.media_type === 'voice' && msg.media_url && (
+                {isVoice && msg.media_url && (
                   <div className="flex items-center space-x-3 py-1 pr-1 select-none">
                     <button
                       type="button"

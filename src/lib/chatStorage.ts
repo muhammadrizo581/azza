@@ -37,6 +37,77 @@ function openChatDB(): Promise<IDBDatabase> {
 }
 
 /**
+ * Xabarni to'liq tekshirish va media_type/media_url ni tiklash
+ */
+function sanitizeMessage(m: Message): Message {
+  let text = m.text || '';
+  let media_url = m.media_url === '[cached]' ? undefined : m.media_url;
+  let media_urls = m.media_urls;
+  let media_type = m.media_type;
+  let duration = m.duration;
+  let reply_to = m.reply_to;
+  let reactions = m.reactions;
+  let is_edited = m.is_edited;
+  let is_read = Boolean(m.is_read);
+
+  // Agar text ichida maxsus json format saqlangan bo'lsa, xotiradagi buzilgan ma'lumotlarni tiklaymiz
+  if (typeof text === 'string' && text.startsWith('__PAYLOAD_JSON__:')) {
+    try {
+      const parsed = JSON.parse(text.replace('__PAYLOAD_JSON__:', ''));
+      text = parsed.text || '';
+      if (!media_url && parsed.media_url && parsed.media_url !== '[cached]') {
+        media_url = parsed.media_url;
+      }
+      if (!media_urls && parsed.media_urls) {
+        media_urls = parsed.media_urls;
+      }
+      if (!media_type && parsed.media_type) {
+        media_type = parsed.media_type;
+      }
+      if (duration === undefined && parsed.duration !== undefined) {
+        duration = parsed.duration;
+      }
+      if (!reply_to && parsed.reply_to) {
+        reply_to = parsed.reply_to;
+      }
+      if (!reactions && parsed.reactions) {
+        reactions = parsed.reactions;
+      }
+      if (parsed.is_read !== undefined) {
+        is_read = Boolean(parsed.is_read);
+      }
+    } catch {}
+  }
+
+  if (!media_url && Array.isArray(media_urls) && media_urls.length > 0) {
+    media_url = media_urls[0];
+  }
+
+  if (!media_type) {
+    if (media_url?.startsWith('data:audio/') || media_url?.includes('audio/')) {
+      media_type = 'voice';
+    } else if (media_url?.startsWith('data:image/') || media_url?.includes('image/') || (media_urls && media_urls.length > 0)) {
+      media_type = 'image';
+    } else if (media_url?.startsWith('data:video/') || media_url?.includes('video/')) {
+      media_type = 'video_note';
+    }
+  }
+
+  return {
+    ...m,
+    text,
+    media_url,
+    media_urls,
+    media_type,
+    duration,
+    reply_to,
+    reactions,
+    is_edited,
+    is_read
+  };
+}
+
+/**
  * Fallback: agar IndexedDB bo'lmasa yoki dastlabki migratsiyada localStorage'dan olish
  */
 function getLocalStorageCache(): Message[] {
@@ -45,7 +116,9 @@ function getLocalStorageCache(): Message[] {
     const raw = localStorage.getItem('azza_chat_cache');
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
+      if (Array.isArray(parsed)) {
+        return parsed.map(sanitizeMessage);
+      }
     }
   } catch {}
   return [];
@@ -65,11 +138,10 @@ export async function getCachedMessages(): Promise<Message[]> {
       req.onsuccess = () => {
         const list = req.result as Message[];
         if (Array.isArray(list) && list.length > 0) {
-          // Vaqti bo'yicha saralaymiz
-          list.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-          resolve(list);
+          const cleaned = list.map(sanitizeMessage);
+          cleaned.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+          resolve(cleaned);
         } else {
-          // Agar IndexedDB hali bo'sh bo'lsa, localStorage'dagi eski xabarlarni olamiz
           resolve(getLocalStorageCache());
         }
       };
@@ -87,33 +159,35 @@ export async function getCachedMessages(): Promise<Message[]> {
  * Xabarlarni IndexedDB xotirasiga to'liq va cheklovsiz saqlash
  */
 export async function saveMessagesCache(messages: Message[]): Promise<void> {
-  if (!Array.isArray(messages)) return;
+  if (!Array.isArray(messages) || messages.length === 0) return;
 
-  // 1. IndexedDB'ga to'liq saqlash (rasmlar, videolar, ovozli xabarlar bilan 1GB+ joy)
+  // 1. IndexedDB'ga to'liq saqlash (rasmlar, ovozlar, matnlar to'liq hajmda saqlanadi)
   try {
     const db = await openChatDB();
     const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
 
-    // Eski xabarlarni tozalab, barchasini to'liq yangilaymiz
-    store.clear();
     for (const msg of messages) {
-      store.put(msg);
+      if (msg && msg.id) {
+        store.put(msg);
+      }
     }
   } catch (err) {
     console.warn('IndexedDB saqlashda ogohlantirish:', err);
   }
 
-  // 2. localStorage uchun yengil zaxira nusxa
+  // 2. localStorage uchun yengil zaxira nusxa (agar joy cheklangan bo'lsa)
   if (typeof window !== 'undefined') {
     try {
-      localStorage.setItem('azza_chat_cache', JSON.stringify(messages));
+      const recentList = messages.slice(-30);
+      localStorage.setItem('azza_chat_cache', JSON.stringify(recentList));
     } catch {
-      // Agar 5MB kvota to'lsa, katta base64 medialarsiz matnli qismini saqlaymiz
       try {
-        const lightList = messages.map((m) => {
+        // Joy yetmasa katta media fayllarsiz saqlash (hech qachon [cached] yozilmaydi!)
+        const lightList = messages.slice(-25).map((m) => {
           if (m.media_url && m.media_url.length > 500) {
-            return { ...m, media_url: '[cached]', media_urls: undefined };
+            const { media_url, media_urls, ...rest } = m;
+            return rest;
           }
           return m;
         });
@@ -132,22 +206,45 @@ export function mergeMessageLists(existingList: Message[], incomingList: Message
   // 1. Avval mavjud (lokal / keshdagi) xabarlarni joylaymiz
   for (const m of existingList) {
     if (m && m.id) {
-      map.set(m.id, m);
+      map.set(m.id, sanitizeMessage(m));
     }
   }
 
   // 2. Serverdan yoki yangi kelgan xabarlar bilan boyitamiz
-  for (const inc of incomingList) {
-    if (!inc || !inc.id) continue;
+  for (const rawInc of incomingList) {
+    if (!rawInc || !rawInc.id) continue;
+    const inc = sanitizeMessage(rawInc);
     const existing = map.get(inc.id);
+
     if (existing) {
-      // Agar lokalda og'ir media yuklangan bo'lsa-yu, server payloadida qisqartirilgan bo'lsa
+      const mergedText = (inc.text && inc.text.trim()) ? inc.text : existing.text;
+      const mergedMediaUrl = (inc.media_url && inc.media_url !== '[cached]')
+        ? inc.media_url
+        : (existing.media_url && existing.media_url !== '[cached]') ? existing.media_url : inc.media_url;
+      const mergedMediaUrls = (inc.media_urls && inc.media_urls.length > 0)
+        ? inc.media_urls
+        : existing.media_urls;
+
+      let mergedMediaType = inc.media_type || existing.media_type;
+      if (!mergedMediaType) {
+        if (mergedMediaUrl?.startsWith('data:audio/') || mergedMediaUrl?.includes('audio/')) {
+          mergedMediaType = 'voice';
+        } else if (mergedMediaUrl?.startsWith('data:image/') || mergedMediaUrl?.includes('image/') || (mergedMediaUrls && mergedMediaUrls.length > 0)) {
+          mergedMediaType = 'image';
+        } else if (mergedMediaUrl?.startsWith('data:video/') || mergedMediaUrl?.includes('video/')) {
+          mergedMediaType = 'video_note';
+        }
+      }
+
       map.set(inc.id, {
         ...existing,
         ...inc,
+        text: mergedText,
+        media_type: mergedMediaType,
+        media_url: mergedMediaUrl,
+        media_urls: mergedMediaUrls,
+        duration: inc.duration !== undefined ? inc.duration : existing.duration,
         is_read: Boolean(inc.is_read || existing.is_read),
-        media_url: inc.media_url || existing.media_url,
-        media_urls: (inc.media_urls && inc.media_urls.length > 0) ? inc.media_urls : existing.media_urls,
         reactions: inc.reactions !== undefined ? inc.reactions : existing.reactions,
         is_edited: inc.is_edited !== undefined ? inc.is_edited : existing.is_edited,
         reply_to: inc.reply_to !== undefined ? inc.reply_to : existing.reply_to
