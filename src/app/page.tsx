@@ -23,7 +23,8 @@ import {
   Pause,
   Check,
   Volume2,
-  VolumeX
+  VolumeX,
+  Reply
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { supabase, isSupabaseConfigured, Message } from '@/lib/supabase';
@@ -45,6 +46,11 @@ function TelegramVideoNote({
   onTouchStart,
   onTouchEnd,
   onContextMenu,
+  partnerDisplayName,
+  currentUser,
+  onReplyClick,
+  isHighlighted,
+  onDoubleClick,
 }: {
   msg: Message;
   isMe: boolean;
@@ -53,6 +59,11 @@ function TelegramVideoNote({
   onTouchStart: () => void;
   onTouchEnd: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
+  partnerDisplayName?: string;
+  currentUser?: string;
+  onReplyClick?: (replyId: string) => void;
+  isHighlighted?: boolean;
+  onDoubleClick?: () => void;
 }) {
   const [isPlayingWithSound, setIsPlayingWithSound] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -154,13 +165,39 @@ function TelegramVideoNote({
   };
 
   return (
-    <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} my-2 select-none`}>
+    <div 
+      id={`msg-${msg.id}`}
+      className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} my-2 select-none transition-all duration-300 ${
+        isHighlighted ? 'p-1.5 rounded-3xl bg-[#6ab2f2]/20 ring-2 ring-[#6ab2f2]' : ''
+      }`}
+    >
+      {/* JAVOB BERILGAN XABAR KVOTASI (REPLY QUOTE) */}
+      {msg.reply_to && (
+        <div
+          onClick={(e) => {
+            e.stopPropagation();
+            onReplyClick?.(msg.reply_to!.id);
+          }}
+          className="mb-1.5 max-w-[200px] flex items-stretch space-x-2 px-2.5 py-1 rounded-lg bg-[#182533]/90 border-l-[3px] border-[#6ab2f2] shadow-md cursor-pointer select-none active:opacity-75"
+        >
+          <div className="min-w-0 flex-1 text-left py-0.5">
+            <div className="text-[11px] font-bold text-[#6ab2f2] leading-tight truncate">
+              {msg.reply_to.sender_id === currentUser ? 'Siz' : (partnerDisplayName || 'Partner')}
+            </div>
+            <div className="text-[12px] text-white/85 leading-tight truncate">
+              {msg.reply_to.text || (msg.reply_to.media_type === 'image' ? '📷 Rasm' : msg.reply_to.media_type === 'voice' ? '🎤 Ovozli xabar' : msg.reply_to.media_type === 'video_note' ? '📹 Dumaloq video' : 'Xabar')}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
         onMouseDown={onTouchStart}
         onMouseUp={onTouchEnd}
         onContextMenu={onContextMenu}
+        onDoubleClick={onDoubleClick}
         onClick={handleToggleSound}
         className={`relative cursor-pointer transition-all duration-300 ${
           isExpanded ? 'w-60 h-60 sm:w-68 sm:h-68' : 'w-44 h-44 sm:w-48 sm:h-48'
@@ -240,6 +277,14 @@ export default function ChatApp() {
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [editText, setEditText] = useState('');
   const [copiedToast, setCopiedToast] = useState(false);
+
+  // JAVOB BERISH (REPLY)
+  const [replyingTo, setReplyingTo] = useState<Message | null>(null);
+  const replyingToRef = useRef<Message | null>(null);
+  const [highlightedMsgId, setHighlightedMsgId] = useState<string | null>(null);
+  const [swipingMsgId, setSwipingMsgId] = useState<string | null>(null);
+  const [swipeOffset, setSwipeOffset] = useState<number>(0);
+  const touchStartPosRef = useRef<{ x: number; y: number; msgId: string } | null>(null);
 
   // VOICE RECORDING
   const [isRecording, setIsRecording] = useState(false);
@@ -357,7 +402,7 @@ export default function ChatApp() {
     });
   };
 
-  // Xabarni parse qilish (oddiy text yoki maxsus json media/edit ma'lumotlari)
+  // Xabarni parse qilish (oddiy text yoki maxsus json media/edit/reply ma'lumotlari)
   const parseIncomingMsg = (raw: any): Message => {
     let text = raw.text || '';
     let media_url = raw.media_url || undefined;
@@ -365,6 +410,7 @@ export default function ChatApp() {
     let media_type = raw.media_type || undefined;
     let duration = raw.duration || undefined;
     let is_edited = raw.is_edited || false;
+    let reply_to = raw.reply_to || undefined;
 
     // Agar text ichida maxsus json format saqlangan bo'lsa
     if (typeof text === 'string' && text.startsWith('__PAYLOAD_JSON__:')) {
@@ -376,6 +422,7 @@ export default function ChatApp() {
         media_type = parsed.media_type || media_type;
         duration = parsed.duration !== undefined ? parsed.duration : duration;
         is_edited = parsed.is_edited !== undefined ? parsed.is_edited : is_edited;
+        reply_to = parsed.reply_to !== undefined ? parsed.reply_to : reply_to;
       } catch {}
     }
 
@@ -387,6 +434,7 @@ export default function ChatApp() {
       media_urls,
       media_type,
       duration,
+      reply_to,
       is_edited,
       is_read: raw.is_read || false,
       created_at: raw.created_at
@@ -489,7 +537,44 @@ export default function ChatApp() {
     setShowProfileDrawer(false);
   };
 
-  // Yangi xabar jo'natish
+  const partnerDisplayName = currentUser === 'me' ? 'azza ❤️' : 's0nd ❤️';
+
+  const getReplySnippet = (msg: Message | null | undefined) => {
+    if (!msg) return '';
+    if (msg.text && msg.text.trim()) return msg.text;
+    if (msg.media_type === 'image') return '📷 Rasm';
+    if (msg.media_type === 'voice') return '🎤 Ovozli xabar';
+    if (msg.media_type === 'video_note') return '📹 Dumaloq video';
+    return 'Xabar';
+  };
+
+  // XABARGA JAVOB BERISH (REPLY)
+  const handleStartReply = (msg: Message) => {
+    setReplyingTo(msg);
+    replyingToRef.current = msg;
+    setSelectedMessage(null);
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 100);
+  };
+
+  const handleCancelReply = () => {
+    setReplyingTo(null);
+    replyingToRef.current = null;
+  };
+
+  const scrollToMessage = (targetId: string) => {
+    const el = document.getElementById(`msg-${targetId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightedMsgId(targetId);
+      setTimeout(() => {
+        setHighlightedMsgId((prev) => (prev === targetId ? null : prev));
+      }, 1600);
+    }
+  };
+
+  // Yangi xabar jo'natish (Reply bilan)
   const handleSendMessage = async (e?: React.FormEvent) => {
     if (e) {
       e.preventDefault();
@@ -498,23 +583,38 @@ export default function ChatApp() {
     const trimmed = inputText.trim();
     if (!trimmed || currentUser === 'guest') return;
 
+    const currentReply = replyingToRef.current || replyingTo;
+    const replyData = currentReply ? {
+      id: currentReply.id,
+      sender_id: currentReply.sender_id,
+      text: getReplySnippet(currentReply),
+      media_type: currentReply.media_type
+    } : null;
+
     const newMsg: Message = {
       id: `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
       sender_id: currentUser as 'me' | 'partner',
       text: trimmed,
+      reply_to: replyData,
       is_read: false,
       created_at: new Date().toISOString()
     };
 
     updateMessagesState((prev) => [...prev, newMsg]);
     setInputText('');
+    setReplyingTo(null);
+    replyingToRef.current = null;
 
     if (supabase) {
+      const payloadText = replyData
+        ? `__PAYLOAD_JSON__:${JSON.stringify({ text: newMsg.text, reply_to: replyData })}`
+        : newMsg.text;
+
       await supabase.from('messages').insert([
         {
           id: newMsg.id,
           sender_id: newMsg.sender_id,
-          text: newMsg.text,
+          text: payloadText,
           created_at: newMsg.created_at,
           is_read: false
         }
@@ -530,7 +630,7 @@ export default function ChatApp() {
     inputRef.current?.focus();
   };
 
-  // XABARNI BOSIB TURISH (LONG PRESS)
+  // XABARNI BOSIB TURISH (LONG PRESS) VA SWIPE TO REPLY
   const handleTouchStart = (msg: Message) => {
     longPressTimerRef.current = setTimeout(() => {
       setSelectedMessage(msg);
@@ -545,6 +645,45 @@ export default function ChatApp() {
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
+  };
+
+  const handleBubbleTouchStart = (e: React.TouchEvent, msg: Message) => {
+    const touch = e.touches[0];
+    touchStartPosRef.current = { x: touch.clientX, y: touch.clientY, msgId: msg.id };
+    handleTouchStart(msg);
+  };
+
+  const handleBubbleTouchMove = (e: React.TouchEvent, msg: Message) => {
+    if (!touchStartPosRef.current || touchStartPosRef.current.msgId !== msg.id) return;
+    const deltaX = e.touches[0].clientX - touchStartPosRef.current.x;
+    const deltaY = e.touches[0].clientY - touchStartPosRef.current.y;
+
+    if (Math.abs(deltaY) > 20 && Math.abs(deltaY) > Math.abs(deltaX)) {
+      handleTouchEnd();
+      setSwipingMsgId(null);
+      setSwipeOffset(0);
+      return;
+    }
+
+    if (deltaX < -10) {
+      handleTouchEnd();
+      const offset = Math.max(-60, deltaX);
+      setSwipingMsgId(msg.id);
+      setSwipeOffset(offset);
+    }
+  };
+
+  const handleBubbleTouchEnd = (msg: Message) => {
+    handleTouchEnd();
+    if (swipingMsgId === msg.id && swipeOffset <= -40) {
+      handleStartReply(msg);
+      if (window.navigator?.vibrate) {
+        window.navigator.vibrate(35);
+      }
+    }
+    setSwipingMsgId(null);
+    setSwipeOffset(0);
+    touchStartPosRef.current = null;
   };
 
   // XABARNI O'CHIRISH (DELETE)
@@ -604,7 +743,14 @@ export default function ChatApp() {
 
     // 2. Supabase'ga yozish (har qanday schema bilan xatosiz ishlashi uchun)
     if (supabase) {
-      const payloadText = `__PAYLOAD_JSON__:${JSON.stringify({ text: newText, is_edited: true })}`;
+      const payloadObj: any = { text: newText, is_edited: true };
+      if (editingMessage.reply_to) payloadObj.reply_to = editingMessage.reply_to;
+      if (editingMessage.media_url) payloadObj.media_url = editingMessage.media_url;
+      if (editingMessage.media_urls) payloadObj.media_urls = editingMessage.media_urls;
+      if (editingMessage.media_type) payloadObj.media_type = editingMessage.media_type;
+      if (editingMessage.duration !== undefined) payloadObj.duration = editingMessage.duration;
+
+      const payloadText = `__PAYLOAD_JSON__:${JSON.stringify(payloadObj)}`;
       await supabase
         .from('messages')
         .update({ text: payloadText })
@@ -628,6 +774,16 @@ export default function ChatApp() {
 
     const base64List = await Promise.all(fileList.map(readBase64));
 
+    const currentReply = replyingToRef.current || replyingTo;
+    const replyData = currentReply ? {
+      id: currentReply.id,
+      sender_id: currentReply.sender_id,
+      text: getReplySnippet(currentReply),
+      media_type: currentReply.media_type
+    } : null;
+    setReplyingTo(null);
+    replyingToRef.current = null;
+
     const newMsg: Message = {
       id: `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
       sender_id: currentUser as 'me' | 'partner',
@@ -635,6 +791,7 @@ export default function ChatApp() {
       media_url: base64List[0],
       media_urls: base64List,
       media_type: 'image',
+      reply_to: replyData,
       is_read: false,
       created_at: new Date().toISOString()
     };
@@ -646,7 +803,8 @@ export default function ChatApp() {
         text: '',
         media_url: base64List[0],
         media_urls: base64List,
-        media_type: 'image'
+        media_type: 'image',
+        reply_to: replyData
       })}`;
 
       await supabase.from('messages').insert([
@@ -745,6 +903,16 @@ export default function ChatApp() {
 
         if (audioBlob.size === 0) return;
 
+        const currentReply = replyingToRef.current;
+        const replyData = currentReply ? {
+          id: currentReply.id,
+          sender_id: currentReply.sender_id,
+          text: getReplySnippet(currentReply),
+          media_type: currentReply.media_type
+        } : null;
+        setReplyingTo(null);
+        replyingToRef.current = null;
+
         const finalVoiceDuration = Math.max(recordingDurationRef.current, 1);
         const reader = new FileReader();
         reader.onloadend = async () => {
@@ -757,6 +925,7 @@ export default function ChatApp() {
             media_url: base64Audio,
             media_type: 'voice',
             duration: finalVoiceDuration,
+            reply_to: replyData,
             is_read: false,
             created_at: new Date().toISOString()
           };
@@ -768,7 +937,8 @@ export default function ChatApp() {
               text: '',
               media_url: base64Audio,
               media_type: 'voice',
-              duration: finalVoiceDuration
+              duration: finalVoiceDuration,
+              reply_to: replyData
             })}`;
 
             await supabase.from('messages').insert([
@@ -996,6 +1166,16 @@ export default function ChatApp() {
 
         if (videoBlob.size === 0) return;
 
+        const currentReply = replyingToRef.current;
+        const replyData = currentReply ? {
+          id: currentReply.id,
+          sender_id: currentReply.sender_id,
+          text: getReplySnippet(currentReply),
+          media_type: currentReply.media_type
+        } : null;
+        setReplyingTo(null);
+        replyingToRef.current = null;
+
         const finalVideoDuration = Math.max(videoRecordingDurationRef.current, 1);
         const reader = new FileReader();
         reader.onloadend = async () => {
@@ -1008,6 +1188,7 @@ export default function ChatApp() {
             media_url: base64Video,
             media_type: 'video_note',
             duration: finalVideoDuration,
+            reply_to: replyData,
             is_read: false,
             created_at: new Date().toISOString()
           };
@@ -1019,7 +1200,8 @@ export default function ChatApp() {
               text: '',
               media_url: base64Video,
               media_type: 'video_note',
-              duration: finalVideoDuration
+              duration: finalVideoDuration,
+              reply_to: replyData
             })}`;
 
             await supabase.from('messages').insert([
@@ -1404,7 +1586,6 @@ export default function ChatApp() {
   // 2. ASOSIY TELEGRAM CHAT EKRANI
   // ==========================================
   const myDisplayName = currentUser === 'me' ? 's0nd ❤️' : 'azza ❤️';
-  const partnerDisplayName = currentUser === 'me' ? 'azza ❤️' : 's0nd ❤️';
 
   // Tanlangan xabar faqat o'zinikimi? (Faqat o'zinikini edit/delete qilish uchun)
   const isSelectedMsgMine = selectedMessage ? selectedMessage.sender_id === currentUser : false;
@@ -1481,6 +1662,11 @@ export default function ChatApp() {
                 isMe={isMe}
                 time={time}
                 isSelected={isMsgSelected}
+                partnerDisplayName={partnerDisplayName}
+                currentUser={currentUser}
+                onReplyClick={scrollToMessage}
+                isHighlighted={highlightedMsgId === msg.id}
+                onDoubleClick={() => handleStartReply(msg)}
                 onTouchStart={() => handleTouchStart(msg)}
                 onTouchEnd={handleTouchEnd}
                 onContextMenu={(e) => {
@@ -1492,20 +1678,44 @@ export default function ChatApp() {
           }
 
           // ODDIY XABARLAR (TEXT, RASM, GOLOS) - PUFAKCHA BILAN
+          const isSwipingThis = swipingMsgId === msg.id;
+
           return (
             <div 
               key={msg.id}
-              className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} my-0.5`}
+              id={`msg-${msg.id}`}
+              className={`relative flex flex-col ${isMe ? 'items-end' : 'items-start'} my-0.5 transition-all duration-300 ${
+                highlightedMsgId === msg.id ? 'p-1 rounded-2xl bg-[#6ab2f2]/20 ring-2 ring-[#6ab2f2]' : ''
+              }`}
             >
-              {/* Xabar pufakchasi (Telegram smooth touch) */}
+              {/* SWIPE TO REPLY BELGISI */}
+              {isSwipingThis && (
+                <div 
+                  className="absolute right-1 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-[#6ab2f2] flex items-center justify-center shadow-lg pointer-events-none transition-all"
+                  style={{
+                    opacity: Math.min(1, Math.abs(swipeOffset) / 35),
+                    transform: `translateY(-50%) scale(${Math.min(1, Math.abs(swipeOffset) / 40)})`
+                  }}
+                >
+                  <Reply className="w-4 h-4 text-white" />
+                </div>
+              )}
+
+              {/* Xabar pufakchasi (Telegram smooth touch va swipe) */}
               <div 
-                onTouchStart={() => handleTouchStart(msg)}
-                onTouchEnd={handleTouchEnd}
+                onTouchStart={(e) => handleBubbleTouchStart(e, msg)}
+                onTouchMove={(e) => handleBubbleTouchMove(e, msg)}
+                onTouchEnd={() => handleBubbleTouchEnd(msg)}
                 onMouseDown={() => handleTouchStart(msg)}
                 onMouseUp={handleTouchEnd}
+                onDoubleClick={() => handleStartReply(msg)}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   setSelectedMessage(msg);
+                }}
+                style={{
+                  transform: isSwipingThis ? `translateX(${swipeOffset}px)` : undefined,
+                  transition: isSwipingThis ? 'none' : 'transform 0.2s ease-out'
                 }}
                 className={`relative max-w-[85%] rounded-2xl px-3.5 py-2 text-[15px] leading-snug shadow-sm cursor-pointer select-none transition-all duration-200 ${
                   isMsgSelected ? 'ring-2 ring-[#6ab2f2] scale-[0.98]' : 'active:scale-[0.98]'
@@ -1515,6 +1725,29 @@ export default function ChatApp() {
                     : 'bg-[#182533] text-white rounded-bl-xs'
                 }`}
               >
+                {/* JAVOB BERILGAN XABAR (REPLY QUOTE) */}
+                {msg.reply_to && (
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      scrollToMessage(msg.reply_to!.id);
+                    }}
+                    className={`mb-1.5 flex items-stretch space-x-2 px-2.5 py-1 rounded-lg cursor-pointer select-none transition-all active:opacity-75 ${
+                      isMe 
+                        ? 'bg-[#1e3b56]/80 border-l-[3px] border-[#6ab2f2]' 
+                        : 'bg-[#101921]/80 border-l-[3px] border-[#5288c1]'
+                    }`}
+                  >
+                    <div className="min-w-0 flex-1 text-left py-0.5">
+                      <div className="text-[11px] font-bold text-[#6ab2f2] leading-tight truncate">
+                        {msg.reply_to.sender_id === currentUser ? 'Siz' : partnerDisplayName}
+                      </div>
+                      <div className="text-[12px] text-white/85 leading-tight truncate">
+                        {msg.reply_to.text || (msg.reply_to.media_type === 'image' ? '📷 Rasm' : msg.reply_to.media_type === 'voice' ? '🎤 Ovozli xabar' : msg.reply_to.media_type === 'video_note' ? '📹 Dumaloq video' : 'Xabar')}
+                      </div>
+                    </div>
+                  </div>
+                )}
                 {/* RASMLAR KO'RINISHI (TELEGRAM USLUBIDA 1 TA YOKI BIR NECHTA RASMLAR ALBOMI) */}
                 {msg.media_type === 'image' && (
                   <div className="mb-1 rounded-xl overflow-hidden">
@@ -1699,7 +1932,33 @@ export default function ChatApp() {
         </footer>
       ) : (
         /* STANDART INPUT PANEL */
-        <footer className="safe-bottom shrink-0 bg-[#17212b] border-t border-[#202b36] px-2.5 pt-2.5">
+        <footer className="safe-bottom shrink-0 bg-[#17212b] border-t border-[#202b36] px-2.5 pt-2 pb-2">
+          {/* JAVOB BERISH (REPLY) PREVIEW PANEL */}
+          {replyingTo && (
+            <div className="flex items-center justify-between pb-2 mb-1.5 border-b border-[#242f3d] px-1 text-xs animate-in slide-in-from-bottom duration-150">
+              <div className="flex items-center space-x-2.5 min-w-0 flex-1">
+                <Reply className="w-4 h-4 text-[#6ab2f2] shrink-0" />
+                <div className="w-0.5 h-7 bg-[#6ab2f2] rounded-full shrink-0"></div>
+                <div className="min-w-0 flex-1 text-left">
+                  <div className="text-[11px] font-bold text-[#6ab2f2] leading-tight truncate">
+                    {replyingTo.sender_id === currentUser ? 'Siz' : partnerDisplayName}
+                  </div>
+                  <div className="text-[12px] text-white/70 leading-tight truncate">
+                    {getReplySnippet(replyingTo)}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleCancelReply}
+                className="p-1.5 text-[#7f91a4] hover:text-white active:scale-90 transition-transform shrink-0 cursor-pointer"
+                title="Javobni bekor qilish"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
           <form 
             onSubmit={handleSendMessage}
             className="flex items-center space-x-1.5 sm:space-x-2"
@@ -1787,13 +2046,23 @@ export default function ChatApp() {
                 {isSelectedMsgMine ? 'Sizning xabaringiz' : `${partnerDisplayName} xabari`}
               </span>
               <p className="text-sm text-white/90 line-clamp-2">
-                {selectedMessage.text || (selectedMessage.media_type === 'image' ? '📷 Rasm' : '🎤 Ovozli xabar')}
+                {selectedMessage.text || (selectedMessage.media_type === 'image' ? '📷 Rasm' : selectedMessage.media_type === 'voice' ? '🎤 Ovozli xabar' : selectedMessage.media_type === 'video_note' ? '📹 Dumaloq video' : 'Xabar')}
               </p>
             </div>
 
             {/* Asosiy amallar bloki */}
             <div className="bg-[#17212b]/95 backdrop-blur-md border border-[#2b394a] rounded-2xl overflow-hidden shadow-2xl divide-y divide-[#242f3d]">
               
+              {/* Javob berish (Reply) */}
+              <button
+                type="button"
+                onClick={() => handleStartReply(selectedMessage)}
+                className="w-full flex items-center justify-between px-4 py-3.5 active:bg-[#242f3d] text-sm text-[#6ab2f2] font-semibold transition cursor-pointer"
+              >
+                <span>Javob berish (Reply)</span>
+                <Reply className="w-4 h-4 text-[#6ab2f2]" />
+              </button>
+
               {/* Nusxalash */}
               {selectedMessage.text && (
                 <button

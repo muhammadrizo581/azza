@@ -24,6 +24,7 @@ export interface Message {
     id: string;
     text: string;
     sender_id: 'me' | 'partner';
+    media_type?: 'image' | 'voice' | 'video_note' | 'sticker' | 'file' | string;
   } | null;
   is_edited?: boolean;
   is_read: boolean;
