@@ -24,7 +24,10 @@ import {
   Check,
   Volume2,
   VolumeX,
-  Reply
+  Reply,
+  ChevronLeft,
+  ChevronRight,
+  Download
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { supabase, isSupabaseConfigured, Message } from '@/lib/supabase';
@@ -375,6 +378,15 @@ export default function ChatApp() {
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const realtimeChannelRef = useRef<any>(null);
   const lastTypingSentRef = useRef<number>(0);
+
+  // TO'LIQ EKRANLI RASMLAR PREVYUSI (TELEGRAM LIGHTBOX)
+  const [lightbox, setLightbox] = useState<{
+    images: string[];
+    currentIndex: number;
+  } | null>(null);
+  const [lightboxDragY, setLightboxDragY] = useState(0);
+  const [isDraggingLightbox, setIsDraggingLightbox] = useState(false);
+  const lightboxTouchStartRef = useRef<{ x: number; y: number } | null>(null);
 
   // VOICE RECORDING
   const [isRecording, setIsRecording] = useState(false);
@@ -969,6 +981,75 @@ export default function ChatApp() {
       await supabase.from('messages').update({ text: payloadText }).eq('id', msgId);
     }
   };
+
+  // TO'LIQ EKRANLI RASM KO'RISH (LIGHTBOX HANDLERS)
+  const handleOpenImage = (images: string[], index = 0) => {
+    setLightbox({ images, currentIndex: index });
+    setLightboxDragY(0);
+    setIsDraggingLightbox(false);
+  };
+
+  const handleCloseLightbox = () => {
+    setLightbox(null);
+    setLightboxDragY(0);
+    setIsDraggingLightbox(false);
+  };
+
+  const handleLightboxTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0];
+    lightboxTouchStartRef.current = { x: t.clientX, y: t.clientY };
+    setIsDraggingLightbox(true);
+  };
+
+  const handleLightboxTouchMove = (e: React.TouchEvent) => {
+    if (!lightboxTouchStartRef.current) return;
+    const deltaY = e.touches[0].clientY - lightboxTouchStartRef.current.y;
+    if (deltaY > 0) {
+      setLightboxDragY(deltaY);
+    }
+  };
+
+  const handleLightboxTouchEnd = (e: React.TouchEvent) => {
+    setIsDraggingLightbox(false);
+    if (!lightboxTouchStartRef.current || !lightbox) return;
+    const touch = e.changedTouches[0];
+    const deltaX = touch.clientX - lightboxTouchStartRef.current.x;
+    const deltaY = touch.clientY - lightboxTouchStartRef.current.y;
+
+    if (deltaY > 90) {
+      handleCloseLightbox();
+      lightboxTouchStartRef.current = null;
+      return;
+    }
+
+    if (lightbox.images.length > 1 && Math.abs(deltaX) > 45 && Math.abs(deltaY) < 50) {
+      if (deltaX < 0 && lightbox.currentIndex < lightbox.images.length - 1) {
+        setLightbox((prev) => prev ? { ...prev, currentIndex: prev.currentIndex + 1 } : null);
+      } else if (deltaX > 0 && lightbox.currentIndex > 0) {
+        setLightbox((prev) => prev ? { ...prev, currentIndex: prev.currentIndex - 1 } : null);
+      }
+    }
+
+    setLightboxDragY(0);
+    lightboxTouchStartRef.current = null;
+  };
+
+  useEffect(() => {
+    if (!lightbox) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setLightbox(null);
+      } else if (e.key === 'ArrowRight' && lightbox.currentIndex < lightbox.images.length - 1) {
+        setLightbox((prev) => prev ? { ...prev, currentIndex: prev.currentIndex + 1 } : null);
+      } else if (e.key === 'ArrowLeft' && lightbox.currentIndex > 0) {
+        setLightbox((prev) => prev ? { ...prev, currentIndex: prev.currentIndex - 1 } : null);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [lightbox]);
 
   // XABARNI BOSIB TURISH (LONG PRESS) VA SWIPE TO REPLY
   const handleTouchStart = (msg: Message) => {
@@ -2119,21 +2200,35 @@ export default function ChatApp() {
                     {msg.media_urls && msg.media_urls.length > 1 ? (
                       <div className={`grid gap-1 ${msg.media_urls.length === 2 ? 'grid-cols-2' : 'grid-cols-2'}`}>
                         {msg.media_urls.map((imgSrc, idx) => (
-                          <div key={idx} className="relative aspect-square overflow-hidden rounded-lg bg-black/20">
+                          <div 
+                            key={idx} 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenImage(msg.media_urls!, idx);
+                            }}
+                            className="relative aspect-square overflow-hidden rounded-lg bg-black/20 cursor-pointer active:scale-95 transition-transform group"
+                          >
                             <img 
                               src={imgSrc} 
                               alt={`rasm ${idx + 1}`} 
-                              className="w-full h-full object-cover"
+                              className="w-full h-full object-cover transition duration-300 group-hover:scale-105"
                             />
                           </div>
                         ))}
                       </div>
                     ) : (
-                      <div className="max-h-72 overflow-hidden rounded-xl">
+                      <div 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const imgUrl = msg.media_url || (msg.media_urls && msg.media_urls[0]);
+                          if (imgUrl) handleOpenImage([imgUrl], 0);
+                        }}
+                        className="max-h-80 overflow-hidden rounded-xl cursor-pointer active:scale-[0.98] transition-transform group"
+                      >
                         <img 
                           src={msg.media_url || (msg.media_urls && msg.media_urls[0])} 
                           alt="rasm" 
-                          className="w-full h-auto object-cover rounded-xl"
+                          className="w-full h-auto max-h-80 object-cover rounded-xl transition duration-300 group-hover:scale-[1.02]"
                         />
                       </div>
                     )}
@@ -2693,6 +2788,128 @@ export default function ChatApp() {
               <span>Yuborish</span>
             </button>
           </div>
+        </div>
+      )}
+
+      {/* TO'LIQ EKRANLI RASMLAR PREVYUSI (TELEGRAM USLUBIDAGI SMOOTH LIGHTBOX) */}
+      {lightbox && (
+        <div 
+          className="fixed inset-0 z-[100] bg-black/95 backdrop-blur-xl flex flex-col items-center justify-between select-none animate-in fade-in duration-200"
+          onClick={handleCloseLightbox}
+        >
+          {/* TEPADAGI PANEL (COUNTER, DOWNLOAD, YOPISH) */}
+          <div 
+            className="w-full h-16 flex items-center justify-between px-4 z-10 bg-gradient-to-b from-black/80 to-transparent"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-sm font-semibold text-white/90">
+              {lightbox.images.length > 1 ? (
+                <span>{lightbox.currentIndex + 1} / {lightbox.images.length}</span>
+              ) : (
+                <span>Rasm</span>
+              )}
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <a 
+                href={lightbox.images[lightbox.currentIndex]} 
+                download={`azza-image-${lightbox.currentIndex + 1}.jpg`}
+                target="_blank"
+                rel="noreferrer"
+                className="w-10 h-10 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center text-white transition hover:bg-white/15"
+                title="Yuklab olish"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <Download className="w-5 h-5" />
+              </a>
+
+              <button
+                type="button"
+                onClick={handleCloseLightbox}
+                className="w-10 h-10 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center text-white transition hover:bg-white/15 cursor-pointer"
+                title="Yopish"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+          {/* O'RTADA ASOSIY RASM */}
+          <div 
+            className="relative flex-1 w-full flex items-center justify-center p-2 sm:p-6 overflow-hidden touch-none"
+            onTouchStart={handleLightboxTouchStart}
+            onTouchMove={handleLightboxTouchMove}
+            onTouchEnd={handleLightboxTouchEnd}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* CHAPGA O'TISH TUGMASI (ALBUM BO'LSA) */}
+            {lightbox.images.length > 1 && lightbox.currentIndex > 0 && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setLightbox((prev) => prev ? { ...prev, currentIndex: prev.currentIndex - 1 } : null);
+                }}
+                className="absolute left-3 z-10 w-11 h-11 rounded-full bg-black/60 active:bg-black/80 text-white flex items-center justify-center backdrop-blur-md border border-white/10 transition shadow-lg"
+              >
+                <ChevronLeft className="w-6 h-6" />
+              </button>
+            )}
+
+            {/* ASOSIY RASM - SMOOTH SCALE VA DRAG EFFEKTI */}
+            <div 
+              className="relative max-w-full max-h-full flex items-center justify-center transition-transform"
+              style={{
+                transform: `translateY(${lightboxDragY}px) scale(${Math.max(0.7, 1 - lightboxDragY / 500)})`,
+                transition: isDraggingLightbox ? 'none' : 'transform 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
+                opacity: Math.max(0.4, 1 - lightboxDragY / 300)
+              }}
+            >
+              <img 
+                src={lightbox.images[lightbox.currentIndex]} 
+                alt={`Photo ${lightbox.currentIndex + 1}`}
+                className="max-h-[82vh] max-w-[96vw] object-contain rounded-lg shadow-2xl animate-in zoom-in-95 duration-200 select-none pointer-events-auto"
+                draggable={false}
+              />
+            </div>
+
+            {/* O'NGGA O'TISH TUGMASI (ALBUM BO'LSA) */}
+            {lightbox.images.length > 1 && lightbox.currentIndex < lightbox.images.length - 1 && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setLightbox((prev) => prev ? { ...prev, currentIndex: prev.currentIndex + 1 } : null);
+                }}
+                className="absolute right-3 z-10 w-11 h-11 rounded-full bg-black/60 active:bg-black/80 text-white flex items-center justify-center backdrop-blur-md border border-white/10 transition shadow-lg"
+              >
+                <ChevronRight className="w-6 h-6" />
+              </button>
+            )}
+          </div>
+
+          {/* PASTKI PANEL (AGAR MULTI-IMAGE ALBUM BO'LSA THUMBNAIL-LAR RO'YXATI) */}
+          {lightbox.images.length > 1 && (
+            <div 
+              className="w-full py-3 px-4 flex items-center justify-center space-x-2 z-10 overflow-x-auto bg-gradient-to-t from-black/80 to-transparent"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {lightbox.images.map((imgUrl, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => setLightbox((prev) => prev ? { ...prev, currentIndex: i } : null)}
+                  className={`w-12 h-12 rounded-lg overflow-hidden shrink-0 border-2 transition-all ${
+                    lightbox.currentIndex === i 
+                      ? 'border-emerald-400 scale-105 shadow-md shadow-emerald-500/30' 
+                      : 'border-white/20 opacity-60 hover:opacity-100'
+                  }`}
+                >
+                  <img src={imgUrl} alt={`Thumb ${i}`} className="w-full h-full object-cover" />
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
