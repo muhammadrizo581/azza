@@ -366,7 +366,13 @@ function TelegramVideoNote({
         {/* VAQT VA STATUS (BOTTOM RIGHT) — OVERFLOWDAN TASHQARIDA, KESILIB KETMAYDI */}
         <div className="absolute bottom-0 right-0 z-10 bg-black/65 backdrop-blur-md px-2 py-0.5 rounded-full flex items-center space-x-1 text-[10px] text-white font-medium shadow-lg pointer-events-none border border-white/10">
           <span>{time}</span>
-          {isMe && <CheckCheck className="w-3 h-3 text-[#6ab2f2]" />}
+          {isMe && (
+            msg.is_read ? (
+              <CheckCheck className="w-3 h-3 text-[#6ab2f2]" />
+            ) : (
+              <Check className="w-3 h-3 text-white/55" />
+            )
+          )}
         </div>
       </div>
 
@@ -590,6 +596,7 @@ export default function ChatApp() {
     let is_edited = raw.is_edited || false;
     let reply_to = raw.reply_to || undefined;
     let reactions = raw.reactions || undefined;
+    let is_read = Boolean(raw.is_read === true || raw.is_read === 'true');
 
     // Agar text ichida maxsus json format saqlangan bo'lsa
     if (typeof text === 'string' && text.startsWith('__PAYLOAD_JSON__:')) {
@@ -603,6 +610,9 @@ export default function ChatApp() {
         is_edited = parsed.is_edited !== undefined ? parsed.is_edited : is_edited;
         reply_to = parsed.reply_to !== undefined ? parsed.reply_to : reply_to;
         reactions = parsed.reactions !== undefined ? parsed.reactions : reactions;
+        if (parsed.is_read !== undefined) {
+          is_read = Boolean(parsed.is_read);
+        }
       } catch {}
     }
 
@@ -617,7 +627,7 @@ export default function ChatApp() {
       reply_to,
       reactions,
       is_edited,
-      is_read: raw.is_read || false,
+      is_read,
       created_at: raw.created_at
     };
   };
@@ -796,6 +806,13 @@ export default function ChatApp() {
           }
         }
       })
+      .on('broadcast', { event: 'messages_read' }, (payload) => {
+        if (payload?.payload?.reader === partnerKey) {
+          updateMessagesState((prev) => 
+            prev.map((m) => (m.sender_id === currentUser && !m.is_read ? { ...m, is_read: true } : m))
+          );
+        }
+      })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
           await channel.track({
@@ -834,6 +851,72 @@ export default function ChatApp() {
       realtimeChannelRef.current = null;
     };
   }, [currentUser]);
+
+  // XABARLARNI O'QILGAN DEB BELGILASH (MARK AS READ)
+  const markPartnerMessagesAsRead = useCallback(async () => {
+    if (!supabase || currentUser === 'guest' || typeof document === 'undefined' || document.visibilityState === 'hidden') return;
+    const partnerKey = currentUser === 'me' ? 'partner' : 'me';
+
+    let hasUnread = false;
+    updateMessagesState((prev) => {
+      if (prev.some((m) => m.sender_id === partnerKey && !m.is_read)) {
+        hasUnread = true;
+        return prev.map((m) => (m.sender_id === partnerKey && !m.is_read ? { ...m, is_read: true } : m));
+      }
+      return prev;
+    });
+
+    if (!hasUnread) return;
+
+    // 1. Realtime orqali sherik tomonga uzatish (u tomonda lahzada 2 ta ko'k galochkaga aylanadi)
+    if (realtimeChannelRef.current) {
+      realtimeChannelRef.current.send({
+        type: 'broadcast',
+        event: 'messages_read',
+        payload: { reader: currentUser }
+      }).catch(() => {});
+    }
+
+    // 2. Supabase bazasida sherik xabarlarini is_read = true qilish
+    try {
+      await supabase
+        .from('messages')
+        .update({ is_read: true })
+        .eq('sender_id', partnerKey)
+        .eq('is_read', false);
+    } catch (e) {
+      console.error('Error updating read status in DB:', e);
+    }
+  }, [currentUser]);
+
+  // Xabarlar kelganda yoki sahifa faol bo'lganda avtomatik o'qildi qilish
+  useEffect(() => {
+    if (currentUser !== 'guest' && typeof document !== 'undefined' && document.visibilityState === 'visible') {
+      const partnerKey = currentUser === 'me' ? 'partner' : 'me';
+      const hasUnread = messages.some((m) => m.sender_id === partnerKey && !m.is_read);
+      if (hasUnread) {
+        const timer = setTimeout(() => {
+          markPartnerMessagesAsRead();
+        }, 400);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [messages, currentUser, markPartnerMessagesAsRead]);
+
+  // Foydalanuvchi ilovaga qaytganda o'qilmagan xabarlarni o'qildi qilish
+  useEffect(() => {
+    const handleActive = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        markPartnerMessagesAsRead();
+      }
+    };
+    window.addEventListener('focus', handleActive);
+    window.addEventListener('visibilitychange', handleActive);
+    return () => {
+      window.removeEventListener('focus', handleActive);
+      window.removeEventListener('visibilitychange', handleActive);
+    };
+  }, [markPartnerMessagesAsRead]);
 
   // Pastga scroll qilish
   useEffect(() => {
@@ -2367,7 +2450,13 @@ export default function ChatApp() {
                     <span className="italic text-[#8bb8e4] text-[9.5px] mr-0.5">tahrirlangan</span>
                   )}
                   <span>{time}</span>
-                  {isMe && <CheckCheck className="w-3 h-3 text-[#6ab2f2]" />}
+                  {isMe && (
+                    msg.is_read ? (
+                      <CheckCheck className="w-3 h-3 text-[#6ab2f2]" />
+                    ) : (
+                      <Check className="w-3 h-3 text-white/55" />
+                    )
+                  )}
                 </div>
               </div>
 

@@ -145,6 +145,7 @@ export function mergeMessageLists(existingList: Message[], incomingList: Message
       map.set(inc.id, {
         ...existing,
         ...inc,
+        is_read: Boolean(inc.is_read || existing.is_read),
         media_url: inc.media_url || existing.media_url,
         media_urls: (inc.media_urls && inc.media_urls.length > 0) ? inc.media_urls : existing.media_urls,
         reactions: inc.reactions !== undefined ? inc.reactions : existing.reactions,
