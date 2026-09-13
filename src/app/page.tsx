@@ -173,6 +173,7 @@ export default function ChatApp() {
   const videoRecordingDurationRef = useRef<number>(0);
   const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
   const [cameraFacingMode, setCameraFacingMode] = useState<'user' | 'environment'>('user');
+  const cameraFacingModeRef = useRef<'user' | 'environment'>('user');
   const [isRecordLocked, setIsRecordLocked] = useState(false);
   const isRecordLockedRef = useRef<boolean>(false);
   const recordTouchStartYRef = useRef<number>(0);
@@ -884,10 +885,10 @@ export default function ChatApp() {
   // KAMERANI O'GIRISH (OLD <-> ORQA KAMERA)
   const handleFlipCamera = async (e?: React.SyntheticEvent) => {
     if (e) {
-      e.preventDefault();
       e.stopPropagation();
     }
-    const nextFacing = cameraFacingMode === 'user' ? 'environment' : 'user';
+    const nextFacing = cameraFacingModeRef.current === 'user' ? 'environment' : 'user';
+    cameraFacingModeRef.current = nextFacing;
     setCameraFacingMode(nextFacing);
 
     try {
@@ -902,7 +903,11 @@ export default function ChatApp() {
         }
         videoStreamRef.current.addTrack(newVideoTrack);
 
+        // Yangi streamdagi qo'shimcha audio trackni to'xtatish (asosiy mikrofon buzilmasligi uchun)
+        newStream.getAudioTracks().forEach((track) => track.stop());
+
         if (liveVideoPreviewRef.current) {
+          liveVideoPreviewRef.current.srcObject = null;
           liveVideoPreviewRef.current.srcObject = videoStreamRef.current;
           liveVideoPreviewRef.current.muted = true;
           liveVideoPreviewRef.current.defaultMuted = true;
@@ -914,6 +919,7 @@ export default function ChatApp() {
         videoStreamRef.current = newStream;
         setVideoStream(newStream);
         if (liveVideoPreviewRef.current) {
+          liveVideoPreviewRef.current.srcObject = null;
           liveVideoPreviewRef.current.srcObject = newStream;
           liveVideoPreviewRef.current.muted = true;
           liveVideoPreviewRef.current.defaultMuted = true;
@@ -921,12 +927,17 @@ export default function ChatApp() {
           liveVideoPreviewRef.current.play().catch(() => {});
         }
       }
+      if (window.navigator?.vibrate) window.navigator.vibrate(30);
     } catch (err) {
       console.error('Flip camera error:', err);
     }
   };
 
-  const handleStopVideoRecording = () => {
+  const handleStopVideoRecording = (e?: React.SyntheticEvent) => {
+    if (e) {
+      e.stopPropagation();
+    }
+    isHoldingRecordRef.current = false;
     isRecordLockedRef.current = false;
     setIsRecordLocked(false);
 
@@ -954,7 +965,6 @@ export default function ChatApp() {
 
   const handleCancelVideoRecording = (e?: React.SyntheticEvent) => {
     if (e) {
-      e.preventDefault();
       e.stopPropagation();
     }
     videoCancelledRef.current = true;
@@ -1014,15 +1024,12 @@ export default function ChatApp() {
       if (inputMode === 'voice') {
         handleStartRecording();
       } else {
-        handleStartVideoRecording(cameraFacingMode);
+        handleStartVideoRecording(cameraFacingModeRef.current);
       }
     }, 280);
   };
 
   const handleRecordButtonUp = (e?: React.SyntheticEvent) => {
-    if (e) {
-      e.preventDefault();
-    }
     if (pressTriggerTimerRef.current) {
       clearTimeout(pressTriggerTimerRef.current);
       pressTriggerTimerRef.current = null;
@@ -1548,35 +1555,22 @@ export default function ChatApp() {
                 <Send className="w-5 h-5 ml-0.5" />
               </button>
             ) : (
-              <div className="flex items-center space-x-1 shrink-0">
-                {inputMode === 'video' && (
-                  <button 
-                    type="button"
-                    onClick={handleFlipCamera}
-                    className="w-10 h-10 rounded-full bg-[#242f3d] active:bg-[#2f3f52] text-emerald-400 shadow-md flex items-center justify-center shrink-0 active:scale-95 transition-all cursor-pointer"
-                    title={cameraFacingMode === 'user' ? "Hozir: Old kamera (Orqaga almashtirish)" : "Hozir: Orqa kamera (Oldga almashtirish)"}
-                  >
-                    <SwitchCamera className="w-5 h-5" />
-                  </button>
+              <button 
+                type="button"
+                onMouseDown={handleRecordButtonDown}
+                onMouseUp={handleRecordButtonUp}
+                onTouchStart={handleRecordButtonDown}
+                onTouchEnd={handleRecordButtonUp}
+                onTouchCancel={handleRecordButtonUp}
+                className="w-10 h-10 rounded-full bg-[#242f3d] active:bg-[#2f3f52] text-[#6ab2f2] shadow-md flex items-center justify-center shrink-0 active:scale-95 transition-all select-none cursor-pointer"
+                title={inputMode === 'voice' ? "Bosib turing - Ovoz, bir marta bosing - Video" : "Bosib turing - Video, bir marta bosing - Ovoz"}
+              >
+                {inputMode === 'voice' ? (
+                  <Mic className="w-5 h-5 animate-in zoom-in-75 duration-100" />
+                ) : (
+                  <Video className="w-5 h-5 animate-in zoom-in-75 duration-100 text-emerald-400" />
                 )}
-
-                <button 
-                  type="button"
-                  onMouseDown={handleRecordButtonDown}
-                  onMouseUp={handleRecordButtonUp}
-                  onTouchStart={handleRecordButtonDown}
-                  onTouchEnd={handleRecordButtonUp}
-                  onTouchCancel={handleRecordButtonUp}
-                  className="w-10 h-10 rounded-full bg-[#242f3d] active:bg-[#2f3f52] text-[#6ab2f2] shadow-md flex items-center justify-center shrink-0 active:scale-95 transition-all select-none cursor-pointer"
-                  title={inputMode === 'voice' ? "Bosib turing - Ovoz, bir marta bosing - Video" : "Bosib turing - Video, bir marta bosing - Ovoz"}
-                >
-                  {inputMode === 'voice' ? (
-                    <Mic className="w-5 h-5 animate-in zoom-in-75 duration-100" />
-                  ) : (
-                    <Video className="w-5 h-5 animate-in zoom-in-75 duration-100 text-emerald-400" />
-                  )}
-                </button>
-              </div>
+              </button>
             )}
           </form>
         </footer>
@@ -1708,8 +1702,14 @@ export default function ChatApp() {
       {/* TELEGRAM YUMALOQ VIDEO YOZISH PAYTIDA JONLI KAMERA KO'RINISHI */}
       {isVideoRecording && (
         <div 
-          onMouseUp={handleRecordButtonUp}
-          onTouchEnd={handleRecordButtonUp}
+          onMouseUp={(e) => {
+            if (isRecordLockedRef.current) return;
+            handleRecordButtonUp(e);
+          }}
+          onTouchEnd={(e) => {
+            if (isRecordLockedRef.current) return;
+            handleRecordButtonUp(e);
+          }}
           className="absolute inset-0 z-40 bg-black/92 backdrop-blur-xs flex flex-col items-center justify-center select-none animate-in fade-in duration-200"
         >
           
@@ -1777,11 +1777,22 @@ export default function ChatApp() {
           )}
 
           {/* PASTKI AMALLAR PANELI — QO'LGA ENG QULAY PASTKI QISMDA */}
-          <div className="absolute bottom-6 sm:bottom-8 left-0 right-0 px-6 flex items-center justify-between z-50 safe-bottom">
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onTouchEnd={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            onMouseUp={(e) => e.stopPropagation()}
+            className="absolute bottom-6 sm:bottom-8 left-0 right-0 px-6 flex items-center justify-between z-50 safe-bottom pointer-events-auto"
+          >
             {/* BEKOR QILISH TUGMASI (CHAP TOMONDA, QIZIL VA QULAY) */}
             <button
               type="button"
-              onClick={handleCancelVideoRecording}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleCancelVideoRecording(e);
+              }}
               className="flex items-center space-x-2 px-4 py-3 rounded-full bg-red-500/25 active:bg-red-500/45 text-red-300 border border-red-500/40 backdrop-blur-md shadow-xl active:scale-95 transition-all cursor-pointer select-none"
               title="Bekor qilish"
             >
@@ -1794,7 +1805,7 @@ export default function ChatApp() {
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                handleStopVideoRecording();
+                handleStopVideoRecording(e);
               }}
               className="w-14 h-14 rounded-full bg-emerald-500 active:bg-emerald-600 text-white shadow-[0_0_25px_rgba(16,185,129,0.5)] flex items-center justify-center active:scale-95 transition-all cursor-pointer select-none"
               title="Yuborish"
@@ -1805,7 +1816,10 @@ export default function ChatApp() {
             {/* KAMERANI ALMASHTIRISH (O'NG TOMONDA, OLD / ORQA) */}
             <button
               type="button"
-              onClick={handleFlipCamera}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleFlipCamera(e);
+              }}
               className="flex items-center space-x-2 px-4 py-3 rounded-full bg-white/15 active:bg-white/30 text-white border border-white/20 backdrop-blur-md shadow-xl active:scale-95 transition-all cursor-pointer select-none"
               title="Kamerani almashtirish"
             >
